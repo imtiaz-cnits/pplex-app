@@ -1,11 +1,16 @@
 {
   "expo": {
-    "name": "pcv-mobile-app",
-    "slug": "pcv-mobile-app",
+    "name": "PPLEX",
+    "slug": "pplex-mobile-app",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
     "ios": {
       "supportsTablet": true
     },
@@ -15,10 +20,29 @@
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+      },
+      "package": "com.imtiaz.cnits.pplexmobileapp",
+      "supportsTV": true
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-font",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "47342ad7-ee2d-4f13-85fd-7fc186a29c79"
+      }
+    },
+    "owner": "imtiaz.cnits"
   }
 }
