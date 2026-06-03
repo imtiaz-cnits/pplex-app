@@ -215,8 +215,8 @@ export default function HomeScreen({ navigation }) {
   );
 
   const renderTvLayout = () => {
-    const liveCategories = ['All', ...new Set(channels.map((c) => c.category).filter(Boolean))];
-    const movieCategories = ['All', ...new Set(MOCK_MOVIES.map((m) => m.genre).filter(Boolean))];
+    const liveCategories = ['All', ...new Set(channels.map((c) => c.category?.trim()).filter(Boolean))];
+    const movieCategories = ['All', ...new Set(MOCK_MOVIES.map((m) => m.genre?.trim()).filter(Boolean))];
 
     const activeCategories = tvSection === 'live' ? liveCategories : movieCategories;
     const activeCategory = tvSection === 'live' ? tvLiveCat : tvMovieCat;

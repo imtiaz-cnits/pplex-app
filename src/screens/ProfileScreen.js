@@ -21,7 +21,7 @@ import { USER_PROFILE } from '../constants/mockData';
 export default function ProfileScreen({ navigation }) {
   const { colors, theme } = useTheme();
   const { showComingSoon } = useOverlays();
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', () => {

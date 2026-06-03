@@ -1,6 +1,11 @@
 // config.js
 // Centralized configuration for Pabna Cable Vision (PPLEX) App
 
+export const CONFIG = {
+  LIVE_TV_SOURCE: 'http://172.19.19.130/playlist.m3u8',
+  CURRENT_VERSION_CODE: 2,
+};
+
 // 1. API Endpoint Base URL (change this to point to the live server)
 // In production, change this to your Next.js api domain or cPanel hosting domain.
 export const API_BASE_URL = 'http://172.19.19.130';

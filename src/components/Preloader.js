@@ -9,8 +9,10 @@ export default function Preloader({ visible }) {
   const { colors, theme } = useTheme();
   const [shouldRender, setShouldRender] = useState(visible);
   
+  const useND = Platform.OS !== 'web';
+
   const fadeAnim = useRef(new Animated.Value(1)).current;
-  const barWidth = useRef(new Animated.Value(0)).current;
+  const barTranslateX = useRef(new Animated.Value(-width)).current;
   const rotateAnim = useRef(new Animated.Value(0)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
@@ -22,15 +24,15 @@ export default function Preloader({ visible }) {
     if (visible) {
       setShouldRender(true);
       fadeAnim.setValue(1);
-      barWidth.setValue(0);
+      barTranslateX.setValue(-width);
       rotateAnim.setValue(0);
       pulseAnim.setValue(1);
 
       // Top bar progress animation
-      Animated.timing(barWidth, {
-        toValue: width,
+      Animated.timing(barTranslateX, {
+        toValue: 0,
         duration: 800,
-        useNativeDriver: false,
+        useNativeDriver: useND,
       }).start();
 
       // Infinite Rotation
@@ -39,7 +41,7 @@ export default function Preloader({ visible }) {
           toValue: 1,
           duration: 1500,
           easing: Easing.linear,
-          useNativeDriver: Platform.OS !== 'web',
+          useNativeDriver: useND,
         })
       ).start();
 
@@ -50,13 +52,13 @@ export default function Preloader({ visible }) {
             toValue: 1.1,
             duration: 1000,
             easing: Easing.bezier(0.4, 0, 0.2, 1),
-            useNativeDriver: Platform.OS !== 'web',
+            useNativeDriver: useND,
           }),
           Animated.timing(pulseAnim, {
             toValue: 1,
             duration: 1000,
             easing: Easing.bezier(0.4, 0, 0.2, 1),
-            useNativeDriver: Platform.OS !== 'web',
+            useNativeDriver: useND,
           }),
         ])
       ).start();
@@ -65,7 +67,7 @@ export default function Preloader({ visible }) {
       Animated.timing(fadeAnim, {
         toValue: 0,
         duration: 400,
-        useNativeDriver: Platform.OS !== 'web',
+        useNativeDriver: useND,
       }).start(() => {
         if (isMounted.current) {
           setShouldRender(false);
@@ -78,12 +80,17 @@ export default function Preloader({ visible }) {
     };
   }, [visible]);
 
+  // Guard: only render when needed
+  if (!shouldRender) return null;
+
+  // Interpolations are defined AFTER the early-return guard so they are
+  // never evaluated unless the component is actually visible. This prevents
+  // the "Animated.Value passed to a normal component" invariant violation
+  // that React/Hermes throws during tab-transition mount cycles.
   const spin = rotateAnim.interpolate({
     inputRange: [0, 1],
     outputRange: ['0deg', '360deg'],
   });
-
-  if (!shouldRender) return null;
 
   return (
     <Animated.View style={[
@@ -94,7 +101,7 @@ export default function Preloader({ visible }) {
       }
     ]}>
       {/* Top Progress Line */}
-      <Animated.View style={[styles.pBar, { width: barWidth, backgroundColor: colors.primary }]} />
+      <Animated.View style={[styles.pBar, { width: width, transform: [{ translateX: barTranslateX }], backgroundColor: colors.primary }]} />
 
       <View style={styles.content}>
         {/* Modern Spinning Ring */}

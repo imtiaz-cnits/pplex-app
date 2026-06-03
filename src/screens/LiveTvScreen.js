@@ -19,14 +19,14 @@ import { MOCK_CHANNELS } from '../constants/mockData';
 
 export default function LiveTvScreen({ navigation }) {
   const { colors, theme } = useTheme();
-  const { setIsLoading, channels, setChannels, isFallback, fetchGlobalPlaylist } = useOverlays();
+  const { setIsLoading, channels, isOffNetwork, fetchGlobalPlaylist } = useOverlays();
   const [categories, setCategories] = useState(['All']);
   const [selectedCat, setSelectedCat] = useState('All');
   const [refreshing, setRefreshing] = useState(false);
   const [fetchError, setFetchError] = useState('');
 
   const updateCategories = (data) => {
-    const cats = ['All', ...new Set(data.map((c) => c.category).filter(Boolean))];
+    const cats = ['All', ...new Set(data.map((c) => c.category?.trim()).filter(Boolean))];
     setCategories(cats);
   };
 
@@ -43,7 +43,7 @@ export default function LiveTvScreen({ navigation }) {
       fetchPlaylist();
     });
     return unsubscribe;
-  }, [navigation, channels]);
+  }, [navigation]);
 
   const handleRefresh = () => {
     setRefreshing(true);
@@ -143,24 +143,24 @@ export default function LiveTvScreen({ navigation }) {
       <TopBar navigation={navigation} />
 
       {/* Connection Failure Warning Banner */}
-      {isFallback && (
+      {isOffNetwork && (
         <View
           style={[
             styles.banner,
             {
-              backgroundColor: theme === 'dark' ? '#2c1a04' : '#fff3e0',
-              borderColor: theme === 'dark' ? '#b78103' : '#ffe0b2',
+              backgroundColor: theme === 'dark' ? 'rgba(255, 0, 0, 0.1)' : '#ffebee',
+              borderColor: '#ff5252',
             },
           ]}
         >
           <Feather
-            name="alert-triangle"
+            name="wifi-off"
             size={16}
-            color={theme === 'dark' ? '#ffd54f' : '#e65100'}
+            color="#ff5252"
             style={{ marginRight: 8 }}
           />
-          <Text style={[styles.bannerText, { color: theme === 'dark' ? '#ffd54f' : '#e65100' }]}>
-            VPN Offline: Connect to PPLEX VPN to stream Live TV. ({fetchError}). Showing offline mock channels.
+          <Text style={[styles.bannerText, { color: '#ff5252' }]}>
+            Please use PCV internet connection to watch live TV.
           </Text>
         </View>
       )}

@@ -7,6 +7,7 @@ import SearchOverlay from './SearchOverlay';
 import NotificationDrawer from './NotificationDrawer';
 import Preloader from './Preloader';
 import ComingSoonModal from './ComingSoonModal';
+import ForceUpdateModal from './ForceUpdateModal';
 import { useOverlays } from '../context/OverlayContext';
 import { navigationRef } from '../navigation/navigationRef';
 
@@ -26,6 +27,7 @@ export default function OverlayManager() {
     pipActive,
     setPipActive,
     pipVideoInfo,
+    forceUpdateData,
   } = useOverlays();
 
   const { width: screenWidth } = useWindowDimensions();
@@ -125,11 +127,16 @@ export default function OverlayManager() {
         visible={notiOpen}
         onClose={() => setNotiOpen(false)}
       />
-      <Preloader visible={isLoading} />
+      {/* <Preloader visible={isLoading} /> */}
       <ComingSoonModal
         visible={comingSoonVisible}
         featureName={comingSoonFeature}
         onClose={() => setComingSoonVisible(false)}
+      />
+      <ForceUpdateModal
+        visible={forceUpdateData.visible}
+        downloadUrl={forceUpdateData.downloadUrl}
+        latestVersionName={forceUpdateData.latestVersion}
       />
 
       {/* Picture-in-Picture Floating Player */}

@@ -1,10 +1,21 @@
-import React, { createContext, useState, useContext } from 'react';
+import React, { createContext, useState, useContext, useEffect } from 'react';
+import { AppState } from 'react-native';
+import parser from 'iptv-playlist-parser';
 import { MOCK_CHANNELS, MOCK_NOTIFICATIONS } from '../constants/mockData';
-import { API_BASE_URL, INTEGRATION_MODE, XTREAM_USERNAME, XTREAM_PASSWORD, FORCE_MOCK_DATA } from '../config';
+import { API_BASE_URL, INTEGRATION_MODE, XTREAM_USERNAME, XTREAM_PASSWORD, FORCE_MOCK_DATA, CONFIG } from '../config';
 import { normalizeChannels } from '../utils/channelAdapter';
 import { parseM3U } from '../utils/m3uParser';
 
 const OverlayContext = createContext();
+
+const hashCode = (str) => {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash << 5) - hash + str.charCodeAt(i);
+    hash |= 0;
+  }
+  return hash;
+};
 
 export const OverlayProvider = ({ children }) => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -15,18 +26,22 @@ export const OverlayProvider = ({ children }) => {
   const [comingSoonFeature, setComingSoonFeature] = useState('');
   const [channels, setChannels] = useState(MOCK_CHANNELS);
   const [isFallback, setIsFallback] = useState(true);
+  const [isOffNetwork, setIsOffNetwork] = useState(false);
   const [pipActive, setPipActive] = useState(false);
   const [pipVideoInfo, setPipVideoInfo] = useState(null);
   const [notifications, setNotifications] = useState(MOCK_NOTIFICATIONS);
+  const [forceUpdateData, setForceUpdateData] = useState({ visible: false, downloadUrl: '', latestVersion: '' });
 
 
   const fetchNotifications = async () => {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 3000);
-      const fetchUrl = `${API_BASE_URL}/notifications.json`;
-
-      const response = await fetch(fetchUrl, { signal: controller.signal });
+      const fetchUrl = `${API_BASE_URL}/notifications.json?t=${Date.now()}`;
+      const response = await fetch(fetchUrl, {
+        signal: controller.signal,
+        headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' },
+      });
       clearTimeout(timeoutId);
 
       if (response.ok) {
@@ -43,124 +58,152 @@ export const OverlayProvider = ({ children }) => {
     return MOCK_NOTIFICATIONS;
   };
 
-  const fetchGlobalPlaylist = async () => {
-    // Refresh notifications in parallel
-    fetchNotifications();
-
+  const fetchLiveChannels = async () => {
     if (FORCE_MOCK_DATA) {
       setChannels(MOCK_CHANNELS);
       setIsFallback(false);
+      setIsOffNetwork(false);
       return MOCK_CHANNELS;
     }
-    if (INTEGRATION_MODE === 'XTREAM') {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 12000);
-        const fetchUrl = `${API_BASE_URL}/player_api.php?username=${XTREAM_USERNAME}&password=${XTREAM_PASSWORD}&action=get_live_streams`;
-        const categoriesUrl = `${API_BASE_URL}/player_api.php?username=${XTREAM_USERNAME}&password=${XTREAM_PASSWORD}&action=get_live_categories`;
 
-        const response = await fetch(fetchUrl, { signal: controller.signal });
-        clearTimeout(timeoutId);
-
-        if (response.ok) {
-          const rawData = await response.json();
-          let rawCategories = [];
-          
-          try {
-            const catController = new AbortController();
-            const catTimeout = setTimeout(() => catController.abort(), 5000);
-            const catResponse = await fetch(categoriesUrl, { signal: catController.signal });
-            clearTimeout(catTimeout);
-            if (catResponse.ok) {
-              rawCategories = await catResponse.json();
-            }
-          } catch (catError) {
-            console.log('Failed to fetch categories mapping:', catError.message);
-          }
-
-          const normalized = normalizeChannels(rawData, rawCategories);
-          if (normalized && normalized.length > 0) {
-            setChannels(normalized);
-            setIsFallback(false);
-            return normalized;
-          }
-        }
-      } catch (e) {
-        console.log('Xtream Codes playlist fetch failed:', e.message);
-      }
-    } else {
-      // STANDARD Custom JSON API or M3U Playlist (Parallel Fetch with 2s Timeout)
-      const urls = [
-        `${API_BASE_URL}/playlist.m3u8`,
-        `${API_BASE_URL}/channels.php`,
-        `${API_BASE_URL}/api/channels`
-      ];
-
-      const fetchWithTimeout = (url) => new Promise(async (resolve, reject) => {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => {
-          controller.abort();
-          reject(new Error('Timeout'));
-        }, 2000);
-
-        try {
-          const response = await fetch(url, { signal: controller.signal });
-          clearTimeout(timeoutId);
-          if (response.ok) {
-            const text = await response.text();
-            // Check if M3U format
-            if (text.trim().startsWith('#EXTM3U') || url.endsWith('.m3u8') || url.endsWith('.m3u')) {
-              const parsed = parseM3U(text);
-              if (parsed && parsed.length > 0) {
-                resolve(parsed);
-                return;
-              }
-            } else {
-              // Try parsing as standard JSON
-              const rawData = JSON.parse(text);
-              const normalized = normalizeChannels(rawData);
-              if (normalized && normalized.length > 0) {
-                resolve(normalized);
-                return;
-              }
-            }
-          }
-          reject(new Error('Non-ok response'));
-        } catch (err) {
-          clearTimeout(timeoutId);
-          reject(err);
-        }
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+      const cacheBustUrl = `${CONFIG.LIVE_TV_SOURCE}?t=${Date.now()}`;
+      const response = await fetch(cacheBustUrl, {
+        signal: controller.signal,
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0',
+        },
       });
+      clearTimeout(timeoutId);
 
-      // Standard Promise.any safe helper for older Hermes engines
-      const safePromiseAny = (promises) => new Promise((resolve, reject) => {
-        let errors = [];
-        let remaining = promises.length;
-        promises.forEach((p) => {
-          Promise.resolve(p)
-            .then(resolve)
-            .catch((err) => {
-              errors.push(err);
-              remaining -= 1;
-              if (remaining === 0) reject(new Error('All failed'));
-            });
-        });
-      });
+      if (response.ok) {
+        const text = await response.text();
+        const parsed = parser.parse(text);
+        
+        if (parsed && parsed.items && parsed.items.length > 0) {
+          const seenIds = new Set();
+          const mapped = parsed.items.map((item, index) => {
+            const colorsList = [
+              { bg: '#e8f5e9', color: '#2e7d32' },
+              { bg: '#fff3e0', color: '#ef6c00' },
+              { bg: '#e3f2fd', color: '#1565c0' },
+              { bg: '#f3e5f5', color: '#7b1fa2' },
+              { bg: '#ffebee', color: '#c62828' },
+              { bg: '#e0f7fa', color: '#00838f' },
+              { bg: '#fce4ec', color: '#ad1457' },
+              { bg: '#f1f8e9', color: '#558b2f' },
+            ];
+            const name = item.name || 'Unknown Channel';
+            const colorIndex = Math.abs(hashCode(name)) % colorsList.length;
+            const category = item.group?.title?.trim() || 'Other';
+            
+            let iconName = 'television';
+            const cat = category.toLowerCase();
+            if (cat.includes('news')) {
+              iconName = 'radio-tower';
+            } else if (cat.includes('sport')) {
+              iconName = 'trophy';
+            } else if (cat.includes('movie') || cat.includes('cinema')) {
+              iconName = 'movie-roll';
+            }
 
-      try {
-        const normalized = await safePromiseAny(urls.map(url => fetchWithTimeout(url)));
-        setChannels(normalized);
-        setIsFallback(false);
-        return normalized;
-      } catch (e) {
-        console.log('Standard channels parallel fetch failed:', e.message);
+            // Ensure unique ID
+            const rawId = item.tvg?.id?.trim() || `m3u-${index + 1}`;
+            let uniqueId = rawId;
+            let counter = 1;
+            while (seenIds.has(uniqueId)) {
+              uniqueId = `${rawId}-${counter}`;
+              counter++;
+            }
+            seenIds.add(uniqueId);
+
+            return {
+              id: uniqueId,
+              name: name,
+              logoUrl: item.tvg?.logo || '',
+              streamUrl: item.url || '',
+              category: category,
+              nowPlaying: 'Live Stream',
+              logoBg: colorsList[colorIndex].bg,
+              logoColor: colorsList[colorIndex].color,
+              iconName: iconName,
+              // Native properties for future/backward compatibility
+              tvg: item.tvg,
+              group: item.group,
+              url: item.url
+            };
+          });
+
+          console.log(`[PCV] Playlist loaded: ${mapped.length} channels from server`);
+          setChannels(mapped);
+          setIsFallback(false);
+          setIsOffNetwork(false);
+          return mapped;
+        }
       }
+      throw new Error('Response status not OK or playlist empty');
+    } catch (error) {
+      console.log('Local network fetch failed:', error.message);
+      setChannels(MOCK_CHANNELS);
+      setIsFallback(true);
+      setIsOffNetwork(true);
+      return MOCK_CHANNELS;
     }
-
-    setChannels(MOCK_CHANNELS);
-    setIsFallback(true);
-    return MOCK_CHANNELS;
   };
+
+  const fetchGlobalPlaylist = async () => {
+    fetchNotifications();
+    return await fetchLiveChannels();
+  };
+
+  const checkAppVersion = async () => {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const url = `http://172.19.19.130/version.json?t=${Date.now()}`;
+      
+      const response = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      
+      if (response.ok) {
+        const data = await response.json();
+        if (data && typeof data.minimumVersionCode === 'number') {
+          if (CONFIG.CURRENT_VERSION_CODE < data.minimumVersionCode) {
+            setForceUpdateData({
+              visible: true,
+              downloadUrl: data.downloadUrl || '',
+              latestVersion: data.latestVersion || 'latest'
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.log('App version check failed/offline:', e.message);
+    }
+  };
+
+  useEffect(() => {
+    // Check version on mount
+    checkAppVersion();
+
+    const handleAppStateChange = (nextAppState) => {
+      if (nextAppState === 'active') {
+        console.log('App returned to foreground, auto-syncing channels...');
+        fetchLiveChannels();
+        checkAppVersion();
+      }
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => {
+      subscription.remove();
+    };
+  }, []);
+
 
   const closeAll = () => {
     setSidebarOpen(false);
@@ -187,6 +230,8 @@ export const OverlayProvider = ({ children }) => {
         channels,
         setChannels,
         isFallback,
+        isOffNetwork,
+        fetchLiveChannels,
         fetchGlobalPlaylist,
         closeAll,
         showComingSoon,
@@ -201,6 +246,8 @@ export const OverlayProvider = ({ children }) => {
         notifications,
         setNotifications,
         fetchNotifications,
+        forceUpdateData,
+        checkAppVersion,
       }}
     >
       {children}

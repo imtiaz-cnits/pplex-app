@@ -5,7 +5,7 @@ import { Feather } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext';
 import { useOverlays } from '../context/OverlayContext';
 
-import { StyleSheet, Animated, Platform, useWindowDimensions } from 'react-native';
+import { StyleSheet, View, Platform, useWindowDimensions } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -27,30 +27,22 @@ function TabNavigator() {
   const { width } = useWindowDimensions();
 
   const isTVMode = Platform.isTV || width > 900;
-  const translateY = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    Animated.timing(translateY, {
-      toValue: isLoading ? 120 : 0,
-      duration: 300,
-      useNativeDriver: Platform.OS !== 'web',
-    }).start();
-  }, [isLoading]);
 
   return (
     <Tab.Navigator
-      tabBar={(props) => (
-        <Animated.View style={{
-          position: 'absolute',
-          bottom: 0,
-          left: 0,
-          right: 0,
-          transform: [{ translateY }],
-          display: isTVMode ? 'none' : 'flex',
-        }}>
-          <BottomTabBar {...props} safeAreaInsets={{ top: 0, bottom: 0, left: 0, right: 0 }} />
-        </Animated.View>
-      )}
+      tabBar={(props) => {
+        if (isTVMode) return null;
+        return (
+          <View style={{
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
+          }}>
+            <BottomTabBar {...props} safeAreaInsets={{ top: 0, bottom: 0, left: 0, right: 0 }} />
+          </View>
+        );
+      }}
       screenOptions={() => ({
         headerShown: false,
         tabBarActiveTintColor: colors.primary,
