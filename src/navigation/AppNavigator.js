@@ -5,7 +5,7 @@ import { Feather } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext';
 import { useOverlays } from '../context/OverlayContext';
 
-import { StyleSheet, View, Platform, useWindowDimensions } from 'react-native';
+import { StyleSheet, View, Platform, useWindowDimensions, Dimensions } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -17,6 +17,9 @@ import ProfileScreen from '../screens/ProfileScreen';
 import MovieDetailScreen from '../screens/MovieDetailScreen';
 import PlayerScreen from '../screens/PlayerScreen';
 
+const { width: initWidth, height: initHeight } = Dimensions.get('window');
+const isTV = Platform.isTV || (Math.min(initWidth, initHeight) >= 500 && Math.max(initWidth, initHeight) > 900);
+
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 
@@ -26,7 +29,7 @@ function TabNavigator() {
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
 
-  const isTVMode = Platform.isTV || width > 900 || (width > height && Platform.OS === 'android');
+  const isTVMode = isTV;
 
   return (
     <Tab.Navigator
@@ -130,8 +133,12 @@ function TabNavigator() {
 
 export default function AppNavigator() {
   return (
-    <Stack.Navigator screenOptions={{ headerShown: false }}>
+    <Stack.Navigator 
+      screenOptions={{ headerShown: false }}
+      initialRouteName={isTV ? "TvDashboard" : "MainTabs"}
+    >
       <Stack.Screen name="MainTabs" component={TabNavigator} />
+      <Stack.Screen name="TvDashboard" component={HomeScreen} />
       <Stack.Screen name="MovieDetail" component={MovieDetailScreen} />
       <Stack.Screen name="Player" component={PlayerScreen} />
     </Stack.Navigator>

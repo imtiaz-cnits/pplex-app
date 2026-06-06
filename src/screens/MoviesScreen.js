@@ -1,15 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   StyleSheet,
   View,
   Text,
-  ScrollView,
-  TouchableOpacity,
+  FlatList,
+  TouchableHighlight,
+  Image,
   StatusBar,
   Dimensions,
   TextInput,
-  Keyboard,
-  KeyboardAvoidingView,
+  ActivityIndicator,
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -17,134 +17,325 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext';
 import { LinearGradient } from 'expo-linear-gradient';
 import TopBar from '../components/TopBar';
+import { fetchMovies, fetchFeaturedMovies, searchMovies, getImageUrl } from '../services/jellyfinApi';
 
-const { width } = Dimensions.get('window');
+const { width, height } = Dimensions.get('window');
+const isTVGlobal = Platform.isTV || (Math.min(width, height) >= 500 && Math.max(width, height) > 900);
+
+// Grid Movie Card for clean layout
+const MovieGridItem = React.memo(({ item, colors, onPress }) => {
+  const [isFocused, setIsFocused] = useState(false);
+  const posterUrl = getImageUrl(item.Id);
+  const rating = item.CommunityRating ? item.CommunityRating.toFixed(1) : null;
+
+  const dateObj = new Date(item.DateCreated || item.PremiereDate);
+  const formattedDate = !isNaN(dateObj.getTime())
+    ? dateObj.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })
+    : (item.ProductionYear || 'N/A');
+
+  return (
+    <TouchableHighlight
+      focusable={true}
+      isTVSelectable={true}
+      onFocus={() => setIsFocused(true)}
+      onBlur={() => setIsFocused(false)}
+      onPress={() => onPress(item)}
+      underlayColor={colors.primary}
+      style={[
+        styles.movieGridCard,
+        { backgroundColor: colors.surface, borderColor: 'transparent' },
+        isFocused && {
+          borderColor: colors.primary,
+          borderWidth: 3,
+          transform: [{ scale: 1.05 }],
+        }
+      ]}
+    >
+      <View style={styles.movieCardInner}>
+        {posterUrl ? (
+          <Image source={{ uri: posterUrl }} style={styles.movieGridImage} />
+        ) : (
+          <View style={[styles.posterPlaceholder, { backgroundColor: colors.bg }]}>
+            <Feather name="film" size={28} color={colors.textSec} />
+          </View>
+        )}
+
+        {rating && (
+          <View style={[styles.ratingBadge, { backgroundColor: colors.primary }]}>
+            <MaterialCommunityIcons name="star" size={10} color="#fff" />
+            <Text style={styles.ratingText}>{rating}</Text>
+          </View>
+        )}
+
+        <LinearGradient
+          colors={['transparent', 'rgba(0, 0, 0, 0.95)']}
+          style={styles.movieDetails}
+        >
+          <Text style={styles.movieTitle} numberOfLines={1}>
+            {item.Name}
+          </Text>
+          <Text style={styles.movieMeta} numberOfLines={1}>
+            {formattedDate}
+          </Text>
+        </LinearGradient>
+      </View>
+    </TouchableHighlight>
+  );
+});
+
+const FeaturedMovieItem = React.memo(({ item, colors, onPress }) => {
+  const [isFocused, setIsFocused] = useState(false);
+  const posterUrl = getImageUrl(item.Id);
+  return (
+    <TouchableHighlight
+      focusable={true}
+      isTVSelectable={true}
+      onFocus={() => setIsFocused(true)}
+      onBlur={() => setIsFocused(false)}
+      onPress={() => onPress(item)}
+      underlayColor={colors.primary}
+      style={[
+        styles.featuredCard,
+        { backgroundColor: colors.surface, borderColor: 'transparent' },
+        isFocused && {
+          borderColor: colors.primary,
+          borderWidth: 2,
+          transform: [{ scale: 1.05 }],
+        }
+      ]}
+    >
+      <View style={styles.movieCardInner}>
+        {posterUrl ? (
+          <Image source={{ uri: posterUrl }} style={styles.movieGridImage} />
+        ) : (
+          <View style={[styles.posterPlaceholder, { backgroundColor: colors.bg }]}>
+            <Feather name="film" size={24} color={colors.textSec} />
+          </View>
+        )}
+        <View style={styles.featuredBadge}>
+          <Text style={styles.featuredBadgeText}>FEATURED</Text>
+        </View>
+        <LinearGradient
+          colors={['transparent', 'rgba(0, 0, 0, 0.9)']}
+          style={styles.movieDetails}
+        >
+          <Text numberOfLines={1} style={styles.movieTitle}>
+            {item.Name}
+          </Text>
+          <Text numberOfLines={1} style={styles.movieMeta}>
+            {item.ProductionYear || 'N/A'}
+          </Text>
+        </LinearGradient>
+      </View>
+    </TouchableHighlight>
+  );
+});
 
 export default function MoviesScreen({ navigation }) {
   const { colors, theme } = useTheme();
-  const [email, setEmail] = useState('');
-  const [subscribed, setSubscribed] = useState(false);
+  const [movies, setMovies] = useState([]);
+  const [featuredMovies, setFeaturedMovies] = useState([]);
+  const [startIndex, setStartIndex] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-  const handleSubscribe = () => {
-    if (email.trim() === '' || !email.includes('@')) {
-      alert('Please enter a valid email address.');
-      return;
+  const isTV = isTVGlobal;
+  const numGridColumns = isTV ? 5 : 3;
+  const gridPadding = 15;
+  const gridGap = 12;
+  const gridCardWidth = (width - (gridPadding * 2) - (gridGap * (numGridColumns - 1))) / numGridColumns;
+  const LIMIT = 30;
+
+  const loadMovies = async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const [data, featured] = await Promise.all([
+        fetchMovies(LIMIT, 0),
+        fetchFeaturedMovies()
+      ]);
+      setMovies(data);
+      setFeaturedMovies(featured);
+      setStartIndex(LIMIT);
+      setHasMore(data.length === LIMIT);
+    } catch (err) {
+      setError('Failed to fetch movies from Jellyfin server.');
+    } finally {
+      setIsLoading(false);
     }
-    Keyboard.dismiss();
-    setSubscribed(true);
   };
 
-  const upcomingFeatures = [
-    { icon: 'film', title: '5000+ Blockbusters & VOD', desc: 'Huge library of Bengali, Hindi, and Hollywood titles.' },
-    { icon: 'video', title: '4K HDR & Dolby Atmos Sound', desc: 'Immersive cinema quality streaming right in your hand.' },
-    { icon: 'tv', title: 'Smart TV Chromecast Casting', desc: 'Cast movies directly to your TV screen with one tap.' },
-    { icon: 'download-cloud', title: 'Offline Offline Downloads', desc: 'Save movies on high-speed internet and watch later.' }
-  ];
+  const handleLoadMore = async () => {
+    if (loadingMore || !hasMore || searchQuery.length > 0) return;
+
+    setLoadingMore(true);
+    try {
+      const data = await fetchMovies(LIMIT, startIndex);
+      if (data.length === 0) {
+        setHasMore(false);
+      } else {
+        setMovies((prev) => [...prev, ...data]);
+        setStartIndex((prev) => prev + LIMIT);
+        if (data.length < LIMIT) {
+          setHasMore(false);
+        }
+      }
+    } catch (err) {
+      console.log('Error loading more movies:', err);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  useEffect(() => {
+    loadMovies();
+  }, []);
+
+  const handleMoviePress = useCallback((movie) => {
+    navigation.navigate('MovieDetail', { movie });
+  }, [navigation]);
+
+  const renderFeaturedItem = useCallback(({ item }) => (
+    <FeaturedMovieItem colors={colors} item={item} onPress={handleMoviePress} />
+  ), [colors, handleMoviePress]);
+
+  const renderMovieItem = useCallback(({ item }) => (
+    <View style={{ width: gridCardWidth, marginBottom: gridGap }}>
+      <MovieGridItem
+        item={item}
+        colors={colors}
+        onPress={handleMoviePress}
+      />
+    </View>
+  ), [gridCardWidth, gridGap, colors, handleMoviePress]);
+
+  useEffect(() => {
+    const delayDebounceFn = setTimeout(async () => {
+      if (searchQuery.trim().length > 0) {
+        setIsSearching(true);
+        const results = await searchMovies(searchQuery);
+        setSearchResults(results);
+        setIsSearching(false);
+      } else {
+        setSearchResults([]);
+      }
+    }, 500);
+
+    return () => clearTimeout(delayDebounceFn);
+  }, [searchQuery]);
+
+  const displayMovies = searchQuery.length > 0 ? searchResults : movies;
+
+  const renderHeader = useCallback(() => {
+    if (searchQuery.length > 0) return null; // Hide header during search
+
+    return (
+      <View style={styles.headerContainer}>
+        {featuredMovies.length > 0 && (
+          <>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Featured Movies</Text>
+            <FlatList
+              data={featuredMovies}
+              horizontal
+              keyExtractor={(item) => String('feat-' + (item.Id || item.id || ''))}
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.featuredListContent}
+              renderItem={renderFeaturedItem}
+            />
+          </>
+        )}
+        <Text style={[styles.sectionTitle, { color: colors.text, marginTop: 15 }]}>Recent Movies</Text>
+      </View>
+    );
+  }, [searchQuery.length, featuredMovies, colors, renderFeaturedItem]);
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.phBg }]}>
       <StatusBar barStyle={theme === 'light' ? 'dark-content' : 'light-content'} backgroundColor={colors.phBg} />
       <TopBar navigation={navigation} />
 
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={{ flex: 1 }}
-      >
-        <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-          {/* Hero Banner Grid/Pattern */}
-          <View style={styles.heroSection}>
-            <LinearGradient
-              colors={colors.primaryGrad}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.heroBadge}
+      {/* Search Section */}
+      <View style={styles.searchSection}>
+        <View style={[styles.searchWrapper, { borderColor: colors.border, backgroundColor: colors.surface }]}>
+          <Feather name="search" size={16} color={colors.textSec} style={styles.searchIcon} />
+          <TextInput
+            style={[styles.searchInput, { color: colors.text }]}
+            placeholder="Search Movies & VOD..."
+            placeholderTextColor={colors.placeholder}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            autoCapitalize="none"
+          />
+          {searchQuery.length > 0 && (
+            <TouchableHighlight
+              onPress={() => setSearchQuery('')}
+              underlayColor="transparent"
+              style={styles.clearBtn}
             >
-              <Text style={styles.badgeText}>COMMITTED TO QUALITY</Text>
-            </LinearGradient>
+              <Feather name="x" size={16} color={colors.textSec} />
+            </TouchableHighlight>
+          )}
+        </View>
+      </View>
 
-            <Text style={[styles.mainTitle, { color: colors.text }]}>
-              Movies & VOD Database
-            </Text>
-            <Text style={[styles.subTitle, { color: colors.textSec }]}>
-              We are working hard to build a premium video-on-demand database server. Stay tuned!
-            </Text>
-
-            {/* Launch Status Card */}
-            <View style={[styles.statusCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-              <View style={styles.statusHeader}>
-                <View style={styles.pulseContainer}>
-                  <View style={[styles.pulseDot, { backgroundColor: colors.primary }]} />
-                  <View style={[styles.pulseRing, { borderColor: colors.primary }]} />
-                </View>
-                <Text style={[styles.statusTitle, { color: colors.text }]}>Development In Progress</Text>
+      {isLoading || isSearching ? (
+        <View style={styles.centerWrapper}>
+          <ActivityIndicator size="large" color={colors.primary} />
+          <Text style={[styles.loadingText, { color: colors.textSec }]}>
+            {isSearching ? 'Searching database...' : 'Loading movies library...'}
+          </Text>
+        </View>
+      ) : error ? (
+        <View style={styles.centerWrapper}>
+          <Feather name="alert-triangle" size={48} color={colors.primary} style={{ marginBottom: 12 }} />
+          <Text style={[styles.errorText, { color: colors.text }]}>{error}</Text>
+          <TouchableHighlight
+            focusable={true}
+            isTVSelectable={true}
+            onPress={loadMovies}
+            underlayColor={colors.primary}
+            style={[styles.retryBtn, { backgroundColor: colors.surface, borderColor: colors.border }]}
+          >
+            <Text style={[styles.retryText, { color: colors.text }]}>Retry Connection</Text>
+          </TouchableHighlight>
+        </View>
+      ) : (
+        <FlatList
+          data={displayMovies}
+          keyExtractor={(item) => String(item.Id || item.id || '')}
+          numColumns={numGridColumns}
+          key={`grid-${numGridColumns}`}
+          removeClippedSubviews={Platform.OS === 'android'}
+          initialNumToRender={15}
+          windowSize={5}
+          contentContainerStyle={[styles.gridContent, { paddingHorizontal: gridPadding }]}
+          columnWrapperStyle={styles.gridRow}
+          onEndReached={handleLoadMore}
+          onEndReachedThreshold={0.5}
+          ListHeaderComponent={renderHeader}
+          renderItem={renderMovieItem}
+          ListFooterComponent={
+            loadingMore ? (
+              <View style={{ paddingVertical: 20, justifyContent: 'center', alignItems: 'center' }}>
+                <ActivityIndicator size="small" color={colors.primary} />
               </View>
-              <Text style={[styles.statusDesc, { color: colors.textSec }]}>
-                Database migration and high-speed local media server integration are currently ongoing.
+            ) : null
+          }
+          ListEmptyComponent={
+            <View style={styles.emptyWrapper}>
+              <Feather name="film" size={40} color={colors.textSec} style={{ marginBottom: 10 }} />
+              <Text style={[styles.emptyText, { color: colors.textSec }]}>
+                {searchQuery.length > 0 ? "No movies match your search." : "No movies found on Jellyfin."}
               </Text>
             </View>
-          </View>
-
-          {/* Core Feature Highlights */}
-          <View style={styles.featuresSection}>
-            <Text style={[styles.sectionHeading, { color: colors.text }]}>Key Highlights</Text>
-            {upcomingFeatures.map((f, i) => (
-              <View key={i} style={[styles.featureRow, { borderBottomColor: colors.border }]}>
-                <View style={[styles.featureIconContainer, { backgroundColor: theme === 'light' ? '#FFEBEB' : 'rgba(255, 0, 0, 0.1)' }]}>
-                  <Feather name={f.icon} size={18} color={colors.primary} />
-                </View>
-                <View style={styles.featureDetails}>
-                  <Text style={[styles.featureTitle, { color: colors.text }]}>{f.title}</Text>
-                  <Text style={[styles.featureDesc, { color: colors.textSec }]}>{f.desc}</Text>
-                </View>
-              </View>
-            ))}
-          </View>
-
-          {/* Premium Subscription Hook Form */}
-          <View style={[styles.newsletterSection, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-            <MaterialCommunityIcons name="movie-filter" size={38} color={colors.primary} style={styles.newsIcon} />
-            <Text style={[styles.newsTitle, { color: colors.text }]}>Request Access & Updates</Text>
-            <Text style={[styles.newsDesc, { color: colors.textSec }]}>
-              Subscribe to get notified as soon as our premium media database server goes live.
-            </Text>
-
-            {!subscribed ? (
-              <View style={styles.formContainer}>
-                <View style={[styles.inputWrapper, { borderColor: colors.border, backgroundColor: colors.bg }]}>
-                  <Feather name="mail" size={16} color={colors.textSec} style={styles.inputIcon} />
-                  <TextInput
-                    style={[styles.input, { color: colors.text }]}
-                    placeholder="Enter your email address"
-                    placeholderTextColor={colors.placeholder}
-                    value={email}
-                    onChangeText={setEmail}
-                    keyboardType="email-address"
-                    autoCapitalize="none"
-                  />
-                </View>
-                <TouchableOpacity activeOpacity={0.8} onPress={handleSubscribe}>
-                  <LinearGradient
-                    colors={colors.primaryGrad}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 1 }}
-                    style={styles.actionBtn}
-                  >
-                    <Text style={styles.actionText}>Get Early Access</Text>
-                  </LinearGradient>
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <View style={styles.successWrapper}>
-                <Feather name="check-circle" size={24} color="#4CAF50" style={{ marginBottom: 6 }} />
-                <Text style={[styles.successTitle, { color: colors.text }]}>Successfully Subscribed!</Text>
-                <Text style={[styles.successDesc, { color: colors.textSec }]}>
-                  We have added <Text style={{ fontWeight: 'bold' }}>{email}</Text> to our database list.
-                </Text>
-              </View>
-            )}
-          </View>
-        </ScrollView>
-      </KeyboardAvoidingView>
+          }
+        />
+      )}
     </SafeAreaView>
   );
 }
@@ -153,192 +344,164 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 110, // scroll fully behind floating navigation
-  },
-  heroSection: {
-    alignItems: 'center',
-    marginVertical: 10,
-  },
-  heroBadge: {
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 8,
-    marginBottom: 12,
-  },
-  badgeText: {
-    color: '#fff',
-    fontSize: 9,
-    fontWeight: '800',
-    letterSpacing: 0.8,
-  },
-  mainTitle: {
-    fontSize: 22,
-    fontWeight: '850',
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  subTitle: {
-    fontSize: 13,
-    lineHeight: 18,
-    textAlign: 'center',
+  searchSection: {
     paddingHorizontal: 15,
-    marginBottom: 20,
-  },
-  statusCard: {
-    width: '100%',
-    borderRadius: 16,
-    borderWidth: 1,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 5,
-    elevation: 2,
-    marginBottom: 15,
-  },
-  statusHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  pulseContainer: {
-    width: 14,
-    height: 14,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
-    position: 'relative',
-  },
-  pulseDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    zIndex: 2,
-  },
-  pulseRing: {
-    position: 'absolute',
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    borderWidth: 1,
-    opacity: 0.6,
-  },
-  statusTitle: {
-    fontSize: 13,
-    fontWeight: '750',
-  },
-  statusDesc: {
-    fontSize: 11.5,
-    lineHeight: 16,
-  },
-  featuresSection: {
-    marginVertical: 15,
-  },
-  sectionHeading: {
-    fontSize: 15,
-    fontWeight: '800',
-    marginBottom: 15,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  featureRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 14,
-    borderBottomWidth: 1,
-  },
-  featureIconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 15,
-  },
-  featureDetails: {
-    flex: 1,
-  },
-  featureTitle: {
-    fontSize: 13.5,
-    fontWeight: '700',
-  },
-  featureDesc: {
-    fontSize: 11,
-    marginTop: 2,
-  },
-  newsletterSection: {
-    borderRadius: 20,
-    borderWidth: 1,
-    padding: 20,
-    alignItems: 'center',
-    marginTop: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 5,
-    elevation: 2,
-  },
-  newsIcon: {
-    marginBottom: 12,
-  },
-  newsTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    textAlign: 'center',
-  },
-  newsDesc: {
-    fontSize: 12,
-    lineHeight: 16,
-    textAlign: 'center',
-    marginTop: 6,
-    marginBottom: 16,
-    paddingHorizontal: 10,
-  },
-  formContainer: {
-    width: '100%',
-  },
-  inputWrapper: {
-    height: 46,
-    borderWidth: 1,
-    borderRadius: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    marginBottom: 12,
-  },
-  inputIcon: {
-    marginRight: 8,
-  },
-  input: {
-    flex: 1,
-    fontSize: 12.5,
-    height: '100%',
-  },
-  actionBtn: {
-    height: 46,
-    borderRadius: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  actionText: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  successWrapper: {
-    alignItems: 'center',
     paddingVertical: 10,
   },
-  successTitle: {
-    fontSize: 14,
+  searchWrapper: {
+    height: 44,
+    borderWidth: 1,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+  },
+  searchIcon: {
+    marginRight: 8,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 13,
+    height: '100%',
+    padding: 0,
+  },
+  clearBtn: {
+    padding: 4,
+  },
+  centerWrapper: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingBottom: 100,
+  },
+  loadingText: {
+    marginTop: 12,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  errorText: {
+    fontSize: 13.5,
+    textAlign: 'center',
+    marginBottom: 16,
+    fontWeight: '650',
+  },
+  retryBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  retryText: {
+    fontSize: 12,
     fontWeight: '700',
   },
-  successDesc: {
-    fontSize: 11.5,
-    textAlign: 'center',
-    marginTop: 4,
+  emptyWrapper: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingTop: 80,
+  },
+  emptyText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  /* Grid Layout Styling (for VOD & Search Results) */
+
+  gridContent: {
+    paddingTop: 5,
+    paddingBottom: 110,
+  },
+  gridRow: {
+    justifyContent: 'space-between',
+  },
+  movieGridCard: {
+    aspectRatio: 2 / 3,
+    borderRadius: 12,
+    borderWidth: 2.5,
+    overflow: 'hidden',
+  },
+  movieGridImage: {
+    width: '100%',
+    height: '100%',
+    resizeMode: 'cover',
+  },
+  /* Common Inner Item Styling */
+  movieCardInner: {
+    flex: 1,
+    position: 'relative',
+  },
+  posterPlaceholder: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  ratingBadge: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 5,
+  },
+  ratingText: {
+    color: '#fff',
+    fontSize: 8,
+    fontWeight: '800',
+  },
+  movieDetails: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    paddingVertical: 8,
+    paddingHorizontal: 6,
+  },
+  movieTitle: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  movieMeta: {
+    color: '#ccc',
+    fontSize: 9,
+    marginTop: 2,
+  },
+  headerContainer: {
+    paddingBottom: 10,
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    paddingHorizontal: 15,
+    marginBottom: 10,
+  },
+  featuredListContent: {
+    paddingHorizontal: 15,
+    gap: 12,
+  },
+  featuredCard: {
+    width: 120,
+    aspectRatio: 2 / 3,
+    borderRadius: 10,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: 'transparent',
+  },
+  featuredBadge: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    backgroundColor: '#00C853',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  featuredBadgeText: {
+    color: '#fff',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 0.5,
   },
 });

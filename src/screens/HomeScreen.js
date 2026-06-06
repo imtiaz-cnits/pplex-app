@@ -23,12 +23,58 @@ import { useOverlays } from '../context/OverlayContext';
 import { LinearGradient } from 'expo-linear-gradient';
 import TopBar from '../components/TopBar';
 import Logo from '../components/Logo';
-import { MOCK_CHANNELS, MOCK_MOVIES, MOCK_ACTORS } from '../constants/mockData';
+import { MOCK_CHANNELS, MOCK_ACTORS } from '../constants/mockData';
+import { fetchLatestMovies, getImageUrl, getBackdropUrl } from '../services/jellyfinApi';
 
-const { width } = Dimensions.get('window');
-const CAROUSEL_HEIGHT = Platform.isTV ? 320 : 200;
+const { width, height } = Dimensions.get('window');
+const isTVGlobal = Platform.isTV || (Math.min(width, height) >= 500 && Math.max(width, height) > 900);
+const CAROUSEL_HEIGHT = Platform.isTV ? 380 : 250;
 const TV_LIVE_ROW_HEIGHT = 117;
 const TV_MOVIE_ROW_HEIGHT = 204;
+
+const HeroCarouselItem = React.memo(({ item, index, colors, isTV, onPress, width, CAROUSEL_HEIGHT }) => {
+  const backdropUrl = getBackdropUrl(item.Id) || getImageUrl(item.Id);
+  const rating = item.CommunityRating ? item.CommunityRating.toFixed(1) : null;
+  const releaseYear = item.ProductionYear || (item.PremiereDate ? new Date(item.PremiereDate).getFullYear() : 'N/A');
+  const genre = item.Genres && item.Genres.length > 0 ? item.Genres[0] : 'Movie';
+
+  return (
+    <TouchableOpacity
+      activeOpacity={0.9}
+      style={{ width: width, height: CAROUSEL_HEIGHT, position: 'relative' }}
+      onPress={() => onPress(item)}
+    >
+      {backdropUrl ? (
+        <Image source={{ uri: backdropUrl }} style={styles.heroImage} />
+      ) : (
+        <View style={[styles.heroImage, { justifyContent: 'center', alignItems: 'center', backgroundColor: '#222' }]} />
+      )}
+      <LinearGradient
+        colors={['transparent', 'transparent', 'rgba(0, 0, 0, 0.6)', colors.phBg]}
+        style={styles.heroOverlay}
+      />
+      <View style={styles.badgeContainer}>
+        <View style={[styles.heroBadge, { backgroundColor: colors.primary }]}>
+          <Text style={styles.heroBadgeText}>Trending #{index + 1}</Text>
+        </View>
+      </View>
+      <View style={styles.heroInfo}>
+        <Text style={[styles.heroTitle, { fontSize: isTV ? 36 : 28 }]} numberOfLines={1}>{item.Name}</Text>
+        <Text style={styles.heroSub}>
+          {`${genre} • ${releaseYear}${rating ? ` • ⭐ ${rating}` : ''}`}
+        </Text>
+        {item.Overview ? (
+          <Text style={styles.heroOverview} numberOfLines={2}>
+            {item.Overview}
+          </Text>
+        ) : null}
+      </View>
+      <View style={styles.playFab}>
+        <Feather name="play" size={24} color="#fff" style={{ marginLeft: 2 }} />
+      </View>
+    </TouchableOpacity>
+  );
+});
 
 export default function HomeScreen({ navigation }) {
   const { colors, theme } = useTheme();
@@ -38,7 +84,7 @@ export default function HomeScreen({ navigation }) {
   const sWidth = (typeof screenWidth === 'number' && !isNaN(screenWidth) && screenWidth > 0) ? screenWidth : 960;
   const sHeight = (typeof screenHeight === 'number' && !isNaN(screenHeight) && screenHeight > 0) ? screenHeight : 540;
 
-  const isTV = Platform.isTV || sWidth > 900 || (sWidth > sHeight && Platform.OS === 'android');
+  const isTV = isTVGlobal;
 
   const tvContentWidth = sWidth - 70;
   const numCols = 5;
@@ -49,6 +95,7 @@ export default function HomeScreen({ navigation }) {
   const [tvLiveCat, setTvLiveCat] = useState('All');
   const [tvMovieCat, setTvMovieCat] = useState('All');
   const [tvActiveSubScreen, setTvActiveSubScreen] = useState('hub');
+  const [movies, setMovies] = useState([]);
   const [debugLogs, setDebugLogs] = useState([]);
   const [initialFocusDone, setInitialFocusDone] = useState(false);
 
@@ -65,7 +112,7 @@ export default function HomeScreen({ navigation }) {
   const tvCatScrollRef = useRef(null);
 
   const liveCategories = ['All', ...new Set(channels.map((c) => c.category?.trim()).filter(Boolean))];
-  const movieCategories = ['All', ...new Set(MOCK_MOVIES.map((m) => m.genre?.trim()).filter(Boolean))];
+  const movieCategories = ['All', ...new Set(movies.map((m) => m.Genres?.[0]?.trim()).filter(Boolean))];
 
   const activeCategories = tvSection === 'live' ? liveCategories : movieCategories;
   const activeCategory = tvSection === 'live' ? tvLiveCat : tvMovieCat;
@@ -73,7 +120,7 @@ export default function HomeScreen({ navigation }) {
 
   const filteredItems = tvSection === 'live'
     ? channels.filter((c) => tvLiveCat === 'All' || c.category?.trim() === tvLiveCat)
-    : MOCK_MOVIES.filter((m) => tvMovieCat === 'All' || m.genre?.trim() === tvMovieCat);
+    : movies.filter((m) => tvMovieCat === 'All' || (m.Genres && m.Genres.includes(tvMovieCat)));
 
   const customFocusedKeyRef = useRef(customFocusedKey);
   const tvSectionRef = useRef(tvSection);
@@ -234,13 +281,7 @@ export default function HomeScreen({ navigation }) {
                   isLive: true
                 });
               } else {
-                navigation.navigate('Player', {
-                  streamUrl: item.streamUrl,
-                  title: item.title,
-                  channels: MOCK_MOVIES,
-                  currentChannelId: item.id,
-                  isLive: false
-                });
+                navigation.navigate('MovieDetail', { movie: item });
               }
             }
           }
@@ -357,30 +398,77 @@ export default function HomeScreen({ navigation }) {
     offsetRef.current = event.nativeEvent.contentOffset.x;
   };
 
-  useEffect(() => {
-    // Initial fetch on mount for TV mode when tab navigation focus triggers don't fire\\\\
+  const loadData = async () => {
     setIsLoading(true);
-    fetchGlobalPlaylist().finally(() => {
+    try {
+      await fetchGlobalPlaylist();
+      const latestMovies = await fetchLatestMovies(200);
+      setMovies(latestMovies);
+    } catch (err) {
+      console.log('Error loading HomeScreen data:', err);
+    } finally {
       setIsLoading(false);
-    });
+    }
+  };
+
+  useEffect(() => {
+    loadData();
 
     const unsubscribe = navigation.addListener('focus', () => {
-      setIsLoading(true);
-      fetchGlobalPlaylist().finally(() => {
-        setIsLoading(false);
-      });
+      loadData();
     });
 
     return unsubscribe;
   }, [navigation]);
 
-  const heroMovies = MOCK_MOVIES.slice(0, 3);
+  // Target categories in the exact specific order requested
+  const targetCategories = [
+    'Bollywood',
+    'Hollywood',
+    'TV Shows & Web Series',
+    'Bangla',
+    'Bangla Dubbed',
+    'Hindi Dubbed',
+    'Collections',
+    'Animation'
+  ];
+
+  let selectedHeroMovies = [];
+  let usedIds = new Set();
+
+  targetCategories.forEach(category => {
+    // Find exactly 1 valid item for this category (max 8 slides total)
+    const matches = movies.filter(m => {
+      if (usedIds.has(m.Id)) return false; // Avoid duplicates across categories
+      if (!m.BackdropImageTags || m.BackdropImageTags.length === 0) return false; // Must have a backdrop
+
+      // Check if it matches via Genre or Folder Path
+      const matchesGenre = m.Genres && m.Genres.some(g => g.toLowerCase().includes(category.toLowerCase()));
+      const matchesPath = m.Path && m.Path.toLowerCase().includes(category.toLowerCase());
+
+      return matchesGenre || matchesPath;
+    }).slice(0, 1);
+
+    matches.forEach(m => {
+      selectedHeroMovies.push(m);
+      usedIds.add(m.Id);
+    });
+  });
+
+  const heroMovies = selectedHeroMovies;
   const recentChannels = channels.slice(0, 4);
 
   // Auto-sliding Hero Carousel
   useEffect(() => {
+    if (!heroMovies || heroMovies.length === 0) return;
+
     slideInterval.current = setInterval(() => {
+      if (isNaN(activeSlide)) {
+        setActiveSlide(0);
+        return;
+      }
       let nextSlide = (activeSlide + 1) % heroMovies.length;
+      if (isNaN(nextSlide)) return;
       setActiveSlide(nextSlide);
       sliderRef.current?.scrollToIndex({
         index: nextSlide,
@@ -391,42 +479,20 @@ export default function HomeScreen({ navigation }) {
     return () => {
       if (slideInterval.current) clearInterval(slideInterval.current);
     };
-  }, [activeSlide]);
+  }, [activeSlide, heroMovies.length]);
 
   const onScroll = (event) => {
     const slideSize = event.nativeEvent.layoutMeasurement.width;
+    if (!slideSize || isNaN(slideSize) || slideSize === 0) return;
     const index = event.nativeEvent.contentOffset.x / slideSize;
+    if (isNaN(index)) return;
     const roundIndex = Math.round(index);
-    if (roundIndex !== activeSlide) {
+    if (!isNaN(roundIndex) && roundIndex !== activeSlide) {
       setActiveSlide(roundIndex);
     }
   };
 
-  const renderHeroItem = ({ item }) => (
-    <TouchableOpacity
-      activeOpacity={0.9}
-      style={styles.heroBanner}
-      onPress={() => showComingSoon('Movies & Video on Demand')}
-    >
-      <Image source={{ uri: item.image }} style={styles.heroImage} />
-      <LinearGradient
-        colors={['transparent', 'rgba(0, 0, 0, 0.35)', 'rgba(0, 0, 0, 0.9)']}
-        style={styles.heroOverlay}
-      />
-      <View style={styles.badgeContainer}>
-        <View style={[styles.heroBadge, { backgroundColor: colors.primary }]}>
-          <Text style={styles.heroBadgeText}>Trending #{heroMovies.indexOf(item) + 1}</Text>
-        </View>
-      </View>
-      <View style={styles.heroInfo}>
-        <Text style={styles.heroTitle}>{item.title}</Text>
-        <Text style={styles.heroSub}>{`${item.genre} • ${item.year} • ⭐ ${item.rating}`}</Text>
-      </View>
-      <View style={styles.playFab}>
-        <Feather name="play" size={24} color="#fff" style={{ marginLeft: 2 }} />
-      </View>
-    </TouchableOpacity>
-  );
+
 
   const renderChannelItem = ({ item }) => (
     <TouchableOpacity
@@ -480,30 +546,45 @@ export default function HomeScreen({ navigation }) {
     </TouchableOpacity>
   );
 
-  const renderMovieItem = ({ item }) => (
-    <TouchableOpacity
-      style={[styles.movieCard, { backgroundColor: colors.surface }]}
-      activeOpacity={0.85}
-      onPress={() => showComingSoon('Movies & Video on Demand')}
-    >
-      <Image source={{ uri: item.image }} style={styles.movieImage} />
-      <View style={styles.ratingBadge}>
-        <MaterialCommunityIcons name="star" size={10} color="#000" />
-        <Text style={styles.ratingText}>{item.rating}</Text>
-      </View>
-      <LinearGradient
-        colors={['transparent', 'rgba(0, 0, 0, 0.95)']}
-        style={styles.movieDetails}
+  const renderMovieItem = ({ item }) => {
+    const posterUrl = getImageUrl(item.Id);
+    const rating = item.CommunityRating ? item.CommunityRating.toFixed(1) : null;
+    const releaseYear = item.ProductionYear || (item.PremiereDate ? new Date(item.PremiereDate).getFullYear() : 'N/A');
+    const genre = item.Genres && item.Genres.length > 0 ? item.Genres[0] : 'Movie';
+
+    return (
+      <TouchableOpacity
+        style={[styles.movieCard, { backgroundColor: colors.surface }]}
+        activeOpacity={0.85}
+        onPress={() => navigation.navigate('MovieDetail', { movie: item })}
       >
-        <Text style={styles.movieTitle} numberOfLines={1}>
-          {item.title}
-        </Text>
-        <Text style={styles.movieMeta} numberOfLines={1}>
-          {`${item.year} • ${item.genre}`}
-        </Text>
-      </LinearGradient>
-    </TouchableOpacity>
-  );
+        {posterUrl ? (
+          <Image source={{ uri: posterUrl }} style={styles.movieImage} />
+        ) : (
+          <View style={[styles.movieImage, { justifyContent: 'center', alignItems: 'center', backgroundColor: '#222' }]}>
+            <Feather name="film" size={24} color={colors.textSec} />
+          </View>
+        )}
+        {rating && (
+          <View style={styles.ratingBadge}>
+            <MaterialCommunityIcons name="star" size={10} color="#000" />
+            <Text style={styles.ratingText}>{rating}</Text>
+          </View>
+        )}
+        <LinearGradient
+          colors={['transparent', 'rgba(0, 0, 0, 0.95)']}
+          style={styles.movieDetails}
+        >
+          <Text style={styles.movieTitle} numberOfLines={1}>
+            {item.Name}
+          </Text>
+          <Text style={styles.movieMeta} numberOfLines={1}>
+            {`${releaseYear} • ${genre}`}
+          </Text>
+        </LinearGradient>
+      </TouchableOpacity>
+    );
+  };
 
   const renderActorItem = ({ item }) => (
     <View style={styles.actorItem}>
@@ -678,7 +759,7 @@ export default function HomeScreen({ navigation }) {
               ref={tvGridRef}
               key={tvSection}
               data={filteredItems}
-              keyExtractor={(item) => item.id}
+              keyExtractor={(item) => String(item.id || item.Id || '')}
               numColumns={5}
               style={{ flex: 1, overflow: 'hidden' }}
               contentContainerStyle={styles.tvGridContent}
@@ -736,13 +817,7 @@ export default function HomeScreen({ navigation }) {
                         setCustomFocusedKey(`grid-${index}`);
                       }}
                       onPress={() => {
-                        navigation.navigate('Player', {
-                          streamUrl: item.streamUrl,
-                          title: item.title,
-                          channels: MOCK_MOVIES,
-                          currentChannelId: item.id,
-                          isLive: false
-                        });
+                        navigation.navigate('MovieDetail', { movie: item });
                       }}
                       style={[
                         styles.tvMovieCard,
@@ -752,14 +827,24 @@ export default function HomeScreen({ navigation }) {
                         }
                       ]}
                     >
-                      <Image source={{ uri: item.image }} style={styles.tvMovieImage} />
-                      <View style={styles.tvMovieRatingBadge}>
-                        <MaterialCommunityIcons name="star" size={12} color="#000" />
-                        <Text style={styles.tvMovieRatingText}>{item.rating}</Text>
-                      </View>
+                      {getImageUrl(item.Id) ? (
+                        <Image source={{ uri: getImageUrl(item.Id) }} style={styles.tvMovieImage} />
+                      ) : (
+                        <View style={[styles.tvMovieImage, { justifyContent: 'center', alignItems: 'center', backgroundColor: '#222' }]}>
+                          <Feather name="film" size={30} color={colors.textSec} />
+                        </View>
+                      )}
+                      {item.CommunityRating && (
+                        <View style={styles.tvMovieRatingBadge}>
+                          <MaterialCommunityIcons name="star" size={12} color="#000" />
+                          <Text style={styles.tvMovieRatingText}>{item.CommunityRating.toFixed(1)}</Text>
+                        </View>
+                      )}
                       <View style={styles.tvMovieMetaWrapper}>
-                        <Text style={[styles.tvMovieTitle, { color: colors.text }]} numberOfLines={1}>{item.title}</Text>
-                        <Text style={[styles.tvMovieYearGenre, { color: colors.textSec }]} numberOfLines={1}>{item.year} • {item.genre}</Text>
+                        <Text style={[styles.tvMovieTitle, { color: colors.text }]} numberOfLines={1}>{item.Name}</Text>
+                        <Text style={[styles.tvMovieYearGenre, { color: colors.textSec }]} numberOfLines={1}>
+                          {(item.ProductionYear || (item.PremiereDate ? new Date(item.PremiereDate).getFullYear() : 'N/A'))} • {item.Genres?.[0] || 'Movie'}
+                        </Text>
                       </View>
                     </Pressable>
                   );
@@ -840,9 +925,23 @@ export default function HomeScreen({ navigation }) {
             showsHorizontalScrollIndicator={false}
             onScroll={onScroll}
             scrollEventThrottle={16}
-            renderItem={renderHeroItem}
-            keyExtractor={(item) => item.id}
-            removeClippedSubviews={false}
+            keyExtractor={(item) => String(item.Id || item.id || '')}
+            initialNumToRender={1}
+            maxToRenderPerBatch={1}
+            windowSize={3}
+            removeClippedSubviews={Platform.OS === 'android'}
+            getItemLayout={(data, index) => ({ length: width, offset: width * index, index })}
+            renderItem={({ item, index }) => (
+              <HeroCarouselItem
+                item={item}
+                index={index}
+                colors={colors}
+                isTV={isTV}
+                width={width}
+                CAROUSEL_HEIGHT={CAROUSEL_HEIGHT}
+                onPress={(movie) => navigation.navigate('MovieDetail', { movie })}
+              />
+            )}
           />
           {/* Slider Dots */}
           <View style={styles.dotsRow}>
@@ -901,7 +1000,7 @@ export default function HomeScreen({ navigation }) {
           horizontal
           showsHorizontalScrollIndicator={false}
           renderItem={renderChannelItem}
-          keyExtractor={(item) => item.id}
+          keyExtractor={(item) => String(item.id || item.Id || '')}
           contentContainerStyle={styles.horizontalList}
           removeClippedSubviews={false}
         />
@@ -910,7 +1009,7 @@ export default function HomeScreen({ navigation }) {
         <View style={[styles.sectionHeader, { paddingTop: 28 }]}>
           <Text style={[styles.sectionTitle, { color: colors.text }]}>New Movies</Text>
           <View style={styles.sectionRightActions}>
-            <TouchableOpacity style={[styles.seeAllBtn, { backgroundColor: colors.primary }]} onPress={() => showComingSoon('Movies & Video on Demand')}>
+            <TouchableOpacity style={[styles.seeAllBtn, { backgroundColor: colors.primary }]} onPress={() => navigation.navigate('Movies')}>
               <Text style={styles.seeAllText}>SEE ALL</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.arrowBtn, { borderColor: colors.border }]} onPress={() => slideList(newMoviesRef, newMoviesOffset, -1)}>
@@ -923,11 +1022,11 @@ export default function HomeScreen({ navigation }) {
         </View>
         <FlatList
           ref={newMoviesRef}
-          data={MOCK_MOVIES.filter((m) => m.isNew)}
+          data={movies.slice(0, 15)}
           horizontal
           showsHorizontalScrollIndicator={false}
           renderItem={renderMovieItem}
-          keyExtractor={(item) => item.id}
+          keyExtractor={(item) => String(item.Id || item.id || '')}
           contentContainerStyle={styles.horizontalList}
           onScroll={(e) => handleScroll(e, newMoviesOffset)}
           scrollEventThrottle={16}
@@ -938,7 +1037,7 @@ export default function HomeScreen({ navigation }) {
         <View style={styles.sectionHeader}>
           <Text style={[styles.sectionTitle, { color: colors.text }]}>Trending Now</Text>
           <View style={styles.sectionRightActions}>
-            <TouchableOpacity style={[styles.seeAllBtn, { backgroundColor: colors.primary }]} onPress={() => showComingSoon('Movies & Video on Demand')}>
+            <TouchableOpacity style={[styles.seeAllBtn, { backgroundColor: colors.primary }]} onPress={() => navigation.navigate('Movies')}>
               <Text style={styles.seeAllText}>SEE ALL</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.arrowBtn, { borderColor: colors.border }]} onPress={() => slideList(trendingRef, trendingOffset, -1)}>
@@ -951,11 +1050,11 @@ export default function HomeScreen({ navigation }) {
         </View>
         <FlatList
           ref={trendingRef}
-          data={MOCK_MOVIES.filter((m) => m.isTrending)}
+          data={movies.slice(15)}
           horizontal
           showsHorizontalScrollIndicator={false}
           renderItem={renderMovieItem}
-          keyExtractor={(item) => item.id}
+          keyExtractor={(item) => String(item.Id || item.id || '')}
           contentContainerStyle={styles.horizontalList}
           onScroll={(e) => handleScroll(e, trendingOffset)}
           scrollEventThrottle={16}
@@ -974,7 +1073,7 @@ export default function HomeScreen({ navigation }) {
           horizontal
           showsHorizontalScrollIndicator={false}
           renderItem={renderActorItem}
-          keyExtractor={(item) => item.id}
+          keyExtractor={(item) => String(item.id || '')}
           contentContainerStyle={styles.horizontalList}
           removeClippedSubviews={false}
         />
@@ -1028,14 +1127,14 @@ const styles = StyleSheet.create({
   },
   heroInfo: {
     position: 'absolute',
-    bottom: 20,
+    bottom: 40,
     left: 20,
     right: 80,
     zIndex: 2,
   },
   heroTitle: {
     fontFamily: 'System',
-    fontSize: 22,
+    fontSize: 28,
     fontWeight: '850',
     color: '#fff',
     ...Platform.select({
@@ -1056,9 +1155,26 @@ const styles = StyleSheet.create({
     marginTop: 4,
     fontWeight: '600',
   },
+  heroOverview: {
+    fontFamily: 'System',
+    fontSize: 13,
+    color: 'rgba(255, 255, 255, 0.75)',
+    marginTop: 8,
+    lineHeight: 18,
+    ...Platform.select({
+      web: {
+        textShadow: '0px 1px 4px rgba(0, 0, 0, 0.8)',
+      },
+      default: {
+        textShadowColor: 'rgba(0, 0, 0, 0.8)',
+        textShadowOffset: { width: 0, height: 1 },
+        textShadowRadius: 4,
+      },
+    }),
+  },
   playFab: {
     position: 'absolute',
-    bottom: 20,
+    bottom: 40,
     right: 20,
     width: 48,
     height: 48,

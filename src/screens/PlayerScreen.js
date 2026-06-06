@@ -16,6 +16,7 @@ import {
   DeviceEventEmitter,
   NativeModules,
   BackHandler,
+  Dimensions,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Video, ResizeMode } from 'expo-av';
@@ -27,6 +28,7 @@ import * as Brightness from 'expo-brightness';
 import * as NavigationBar from 'expo-navigation-bar';
 import { useKeepAwake } from 'expo-keep-awake';
 import { useOverlays } from '../context/OverlayContext';
+import { reportPlaybackProgress, fetchMovieDetails } from '../services/jellyfinApi';
 
 const { PipModule } = NativeModules;
 const isPipAvailable = PipModule && typeof PipModule.setCanEnterPip === 'function';
@@ -48,6 +50,9 @@ const CATEGORY_IMAGES = {
   'Sci-Fi': 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=400',
   'Other': 'https://images.unsplash.com/photo-1594909122845-11baa439b7bf?q=80&w=400',
 };
+
+const { width: initWidth, height: initHeight } = Dimensions.get('window');
+const isTVGlobal = Platform.isTV || (Math.min(initWidth, initHeight) >= 500 && Math.max(initWidth, initHeight) > 900);
 
 // Custom component for drawer items to manage focus state locally and prevent sticky focus
 const DrawerChannelItem = React.memo(({
@@ -102,7 +107,7 @@ const DrawerChannelItem = React.memo(({
         <View style={[styles.drawerItemLogoPlaceholder, { backgroundColor: item.logoBg || '#222' }]}>
           <Feather
             name={item.iconName === 'television' ? 'tv' : 'radio'}
-            size={24}
+            size={18}
             color={item.logoColor || '#fff'}
           />
         </View>
@@ -129,15 +134,60 @@ export default function PlayerScreen({ route, navigation }) {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const isPortrait = width < height;
-  const isTV = Platform.isTV || width > 900 || (width > height && Platform.OS === 'android');
-  const isTVDevice = Platform.isTV || width > 900;
+  const isTV = isTVGlobal;
+  const isTVDevice = isTVGlobal;
   const videoRef = useRef(null);
 
   // PiP State
   const [isInPip, setIsInPip] = useState(false);
 
   // Params
-  const { streamUrl, title, channels = [], currentChannelId = null, isLive: isLiveParam } = route.params || {};
+  const { streamUrl, title, channels = [], currentChannelId = null, isLive: isLiveParam, itemId, movie } = route.params || {};
+
+  const positionRef = useRef(route.params?.resumePosition || 0);
+  const startPositionTicks = movie?.UserData?.PlaybackPositionTicks || 0;
+  const startPositionMillis = Math.round(startPositionTicks / 10000); // 1ms = 10,000 ticks
+  const initialPosition = route.params?.resumePosition || startPositionMillis;
+
+  const [resumePosition, setResumePosition] = useState(initialPosition);
+
+  const itemIdRef = useRef(itemId);
+  useEffect(() => {
+    itemIdRef.current = itemId;
+  }, [itemId]);
+
+  useEffect(() => {
+    return () => {
+      if (itemIdRef.current && positionRef.current > 0) {
+        const positionTicks = positionRef.current * 10000;
+        reportPlaybackProgress(itemIdRef.current, positionTicks);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const refreshPlaybackData = async () => {
+      if (!itemId || route.params?.resumePosition) return;
+      try {
+        const freshDetails = await fetchMovieDetails(itemId);
+        if (freshDetails?.UserData?.PlaybackPositionTicks) {
+          const freshTicks = freshDetails.UserData.PlaybackPositionTicks;
+          const freshMillis = Math.round(freshTicks / 10000);
+          setResumePosition(freshMillis);
+
+          // Seek to the fresh position if player is loaded
+          if (videoRef.current && freshMillis > 0) {
+            videoRef.current.setPositionAsync(freshMillis);
+            positionRef.current = freshMillis;
+          }
+        }
+      } catch (err) {
+        console.log('Error refreshing playback progress:', err);
+      }
+    };
+
+    refreshPlaybackData();
+  }, [itemId, route.params?.resumePosition]);
 
   // Current Playback State
   const [currentUrl, setCurrentUrl] = useState(streamUrl || 'https://vjs.zencdn.net/v/oceans.mp4');
@@ -200,6 +250,16 @@ export default function PlayerScreen({ route, navigation }) {
   const isLive = isLiveParam !== undefined ? isLiveParam : ((channels && channels.length > 0) || !status.durationMillis || status.durationMillis === 0);
   const originalBrightnessRef = useRef(1.0);
 
+  const handlePreviousChannelRef = useRef(handlePreviousChannel);
+  const handleNextChannelRef = useRef(handleNextChannel);
+  const isLiveRef = useRef(isLive);
+
+  useEffect(() => {
+    handlePreviousChannelRef.current = handlePreviousChannel;
+    handleNextChannelRef.current = handleNextChannel;
+    isLiveRef.current = isLive;
+  });
+
   // TV D-Pad Focus State
   const [focusedBtnId, setFocusedBtnId] = useState(null);
   const focusedBtnIdRef = useRef(null);
@@ -258,10 +318,10 @@ export default function PlayerScreen({ route, navigation }) {
   const getTvProps = (btnId, baseStyle = {}) => {
     const isFocused = focusedBtnId === btnId;
     const isDrawerItem = btnId.startsWith('drawer-');
-    
+
     // Trap focus inside the drawer when open, and inside control overlay when closed.
     const isFocusable = isDrawerItem ? rightDrawerOpen : !rightDrawerOpen;
-    
+
     const focusColor = isLive ? '#00C853' : '#FF0000';
     const focusBgColor = isLive ? 'rgba(0, 200, 83, 0.35)' : 'rgba(255, 0, 0, 0.35)';
     return {
@@ -597,7 +657,7 @@ export default function PlayerScreen({ route, navigation }) {
   const cycleResizeMode = () => {
     const nextIndex = (resizeModeIndex + 1) % RESIZE_MODES.length;
     setResizeModeIndex(nextIndex);
-    
+
     // Show visual HUD feedback
     setHudType('aspect');
     setHudVisible(true);
@@ -659,8 +719,8 @@ export default function PlayerScreen({ route, navigation }) {
   };
 
   const getItemLayout = (data, index) => ({
-    length: 72,
-    offset: 72 * index,
+    length: 56,
+    offset: 56 * index,
     index,
   });
 
@@ -670,28 +730,7 @@ export default function PlayerScreen({ route, navigation }) {
     index,
   });
 
-  // Active channel scrolling persistence when drawer opens
-  useEffect(() => {
-    if (rightDrawerOpen && filteredChannels.length > 0) {
-      const activeIdx = filteredChannels.findIndex(c => String(c.id) === String(activeChannelId));
-      if (activeIdx !== -1) {
-        const timer = setTimeout(() => {
-          try {
-            if (activeIdx >= 0 && activeIdx < filteredChannelsRef.current.length) {
-              channelsListRef.current?.scrollToIndex({
-                index: activeIdx,
-                animated: false,
-                viewPosition: 0.5,
-              });
-            }
-          } catch (err) {
-            console.log('[DEBUG] setTimeout scrollToIndex error:', err);
-          }
-        }, 120);
-        return () => clearTimeout(timer);
-      }
-    }
-  }, [rightDrawerOpen]);
+
 
   const focusedDrawerIndexRef = useRef(focusedDrawerIndex);
   const filteredChannelsRef = useRef(filteredChannels);
@@ -704,7 +743,7 @@ export default function PlayerScreen({ route, navigation }) {
       if (!evt) return;
       const { eventType, eventKeyAction } = evt;
       if (eventKeyAction !== undefined && eventKeyAction !== 0) return;
-      
+
       const currentFocusedDrawerIndex = focusedDrawerIndexRef.current;
       const currentFilteredChannels = filteredChannelsRef.current;
 
@@ -780,6 +819,8 @@ export default function PlayerScreen({ route, navigation }) {
   }, [rightDrawerOpen, currentUrl, currentTitle, channels, activeChannelId, isLive]);
 
   async function handlePopout() {
+    const currentPos = positionRef.current;
+
     if (isTVDevice) {
       if (navigation.canGoBack()) {
         navigation.goBack();
@@ -804,7 +845,8 @@ export default function PlayerScreen({ route, navigation }) {
       title: currentTitle,
       channels: channels,
       currentChannelId: activeChannelId,
-      isLive: isLive
+      isLive: isLive,
+      resumePosition: currentPos
     });
     setPipActive(true);
 
@@ -884,7 +926,7 @@ export default function PlayerScreen({ route, navigation }) {
     }
   };
 
-  // PanResponder to manage swipes (Volume & Brightness)
+  // PanResponder to manage swipes (Volume & Brightness & Horizontal Channel Swiping)
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: (evt) => {
@@ -899,21 +941,28 @@ export default function PlayerScreen({ route, navigation }) {
         const { pageX, pageY } = evt.nativeEvent;
         if (pageY < 50 || pageY > heightRef.current - 40) return false;
         if (pageX < 60 || pageX > widthRef.current - 60) return false;
-        return Math.abs(gestureState.dy) > 10;
+        return Math.abs(gestureState.dy) > 10 || Math.abs(gestureState.dx) > 10;
       },
       onPanResponderGrant: (evt, gestureState) => {
-        startVolume.current = volume;
-        startBrightness.current = brightness;
+        startVolume.current = volumeRef.current;
+        startBrightness.current = brightnessRef.current;
       },
       onPanResponderMove: (evt, gestureState) => {
-        const { x0, dy } = gestureState;
-        const scale = 200;
+        const { dx, dy, x0 } = gestureState;
+
+        // If horizontal movement is dominant, ignore volume/brightness adjustment
+        if (Math.abs(dx) > Math.abs(dy)) {
+          return;
+        }
+
+        const scale = 800; // Increased scale from 200 to 800 for slower, more controlled adjustments
         const delta = -dy / scale;
 
         if (x0 < widthRef.current / 2) {
           // Adjust screen brightness (left 50%)
           const val = Math.max(0.1, Math.min(1.0, startBrightness.current + delta));
           setBrightness(val);
+          brightnessRef.current = val; // Synchronously update ref to prevent stale jumps
           if (!isTV) {
             Brightness.setBrightnessAsync(val).catch((err) => {
               console.log('Error setting screen brightness:', err);
@@ -925,6 +974,7 @@ export default function PlayerScreen({ route, navigation }) {
           // Adjust audio volume (right 50%)
           const val = Math.max(0.0, Math.min(1.0, startVolume.current + delta));
           setVolume(val);
+          volumeRef.current = val; // Synchronously update ref to prevent stale jumps
           if (VolumeManager) {
             try {
               VolumeManager.setVolume(val);
@@ -939,7 +989,20 @@ export default function PlayerScreen({ route, navigation }) {
         showControlsWithTimeout();
         if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
       },
-      onPanResponderRelease: () => {
+      onPanResponderRelease: (evt, gestureState) => {
+        const { dx, dy } = gestureState;
+
+        // Swipe channel navigation logic (only for live TV streams)
+        if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 50) {
+          if (isLiveRef.current) {
+            if (dx > 0) {
+              handlePreviousChannelRef.current?.();
+            } else {
+              handleNextChannelRef.current?.();
+            }
+          }
+        }
+
         hudTimerRef.current = setTimeout(() => {
           setHudVisible(false);
         }, 1000);
@@ -993,17 +1056,24 @@ export default function PlayerScreen({ route, navigation }) {
           onLoadStart={() => setIsLoading(true)}
           onLoad={() => {
             setIsLoading(false);
-            if (videoRef.current && speed !== 1.0) {
-              videoRef.current.setRateAsync(speed, true);
+            if (videoRef.current) {
+              if (speed !== 1.0) {
+                videoRef.current.setRateAsync(speed, true);
+              }
+              if (resumePosition > 0) {
+                videoRef.current.setPositionAsync(resumePosition);
+                positionRef.current = resumePosition;
+              }
             }
           }}
           onError={(error) => {
             setIsLoading(false);
-            console.log('Video error:', error);
+            console.log('Video error:', error, 'for URL:', currentUrl);
           }}
           onPlaybackStatusUpdate={(statusUpdate) => {
             setStatus(statusUpdate);
             if (statusUpdate.isLoaded) {
+              positionRef.current = statusUpdate.positionMillis;
               if (statusUpdate.didJustFinish) {
                 setIsPlaying(false);
               } else {
@@ -1059,528 +1129,528 @@ export default function PlayerScreen({ route, navigation }) {
               onPress={handleTap}
             />
 
-        {/* Left edge touch area to open channels list */}
-        {!isLocked && !rightDrawerOpen && (
-          <TouchableOpacity
-            style={styles.leftEdgeTouchZone}
-            activeOpacity={1}
-            onPress={() => {
-              setRightDrawerOpen(true);
-              showControlsWithTimeout();
-            }}
-          />
-        )}
-
-        {/* Right edge touch area to open channels list */}
-        {!isLocked && !rightDrawerOpen && (
-          <TouchableOpacity
-            style={styles.rightEdgeTouchZone}
-            activeOpacity={1}
-            onPress={() => {
-              setRightDrawerOpen(true);
-              showControlsWithTimeout();
-            }}
-          />
-        )}
-
-        {/* Loading Spinner overlay */}
-        {isLoading && (
-          <View style={styles.spinnerWrapper} pointerEvents="none">
-            <ActivityIndicator size="large" color="#FF0000" />
-            <Text style={styles.loadingText}>Loading Stream...</Text>
-          </View>
-        )}
-
-        {/* Dynamic HUD Indicator Capsule (Gestures & Orientation matched) */}
-        {hudVisible && (
-          <View
-            style={(hudType === 'volume' || hudType === 'brightness' || hudType === 'aspect') ? styles.hudSimpleContainer : styles.hudContainer}
-            pointerEvents="none"
-          >
-            {hudType === 'volume' || hudType === 'brightness' || hudType === 'aspect' ? (
-              <Text style={styles.hudSimpleText}>
-                {hudType === 'volume'
-                  ? `Volume: ${Math.round(volume * 100)}%`
-                  : hudType === 'brightness'
-                    ? `Brightness: ${Math.round(brightness * 100)}%`
-                    : `Aspect: ${RESIZE_LABELS[resizeModeIndex]}`}
-              </Text>
-            ) : (
-              <>
-                <Feather
-                  name={
-                    hudType === 'auto_rotate'
-                      ? 'rotate-cw'
-                      : hudType === 'lock_landscape'
-                        ? 'video'
-                        : 'smartphone'
-                  }
-                  size={24}
-                  color="#FF0000"
-                  style={{ marginBottom: 8 }}
-                />
-                <Text style={styles.hudText}>
-                  {hudType === 'auto_rotate'
-                    ? 'Auto Rotate'
-                    : hudType === 'lock_landscape'
-                      ? 'Landscape Locked'
-                      : 'Portrait Locked'}
-                </Text>
-              </>
-            )}
-          </View>
-        )}
-
-        {/* Double-Tap Seeking overlay indicator */}
-        {seekIndicator && (
-          <View style={styles.seekIndicatorContainer} pointerEvents="none">
-            <View style={styles.seekIndicatorCircle}>
-              <Feather
-                name={seekIndicator === 'forward' ? 'chevrons-right' : 'chevrons-left'}
-                size={32}
-                color="#fff"
-              />
-              <Text style={styles.seekIndicatorText}>
-                {seekIndicator === 'forward' ? '+10s' : '-10s'}
-              </Text>
-            </View>
-          </View>
-        )}
-
-        {/* Control Interface Overlay */}
-        {controlsVisible && !isLocked && (
-          <View style={[styles.overlayWrapper, isLive && { backgroundColor: 'transparent' }]} pointerEvents="box-none">
-            {/* Header section (HTML style matched) */}
-            {!isLive && (
-              <View style={[
-                styles.header,
-                {
-                  paddingTop: Math.max(12, insets.top),
-                  paddingLeft: Math.max(20, insets.left),
-                  paddingRight: Math.max(20, insets.right)
-                }
-              ]}>
-              <View style={styles.headerLeft}>
-                {channels && channels.length > 0 && (
-                  <Pressable
-                    onPress={() => {
-                      setRightDrawerOpen(true);
-                      showControlsWithTimeout();
-                    }}
-                    {...getTvProps('btn-menu', [styles.iconBtn, isPortrait && styles.iconBtnPortrait])}
-                  >
-                    <Feather name="menu" size={isPortrait ? 20 : 24} color="#fff" />
-                  </Pressable>
-                )}
-
-                <Pressable
-                  onPress={handlePopout}
-                  {...getTvProps('btn-back', [styles.iconBtn, isPortrait && styles.iconBtnPortrait, { marginLeft: isPortrait ? 6 : 10 }])}
-                >
-                  <Feather name="arrow-left" size={isPortrait ? 20 : 24} color="#fff" />
-                </Pressable>
-
-                <Text style={styles.headerTitle} numberOfLines={1}>
-                  {currentTitle}
-                </Text>
-              </View>
-
-              <View style={styles.headerRight}>
-                {/* Cast Icon (Mocked) */}
-                {!isLive && (
-                  <Feather name="cast" size={isPortrait ? 18 : 22} color="#fff" style={{ marginRight: 15 }} />
-                )}
-
-                {/* Settings Toggle */}
-                {!isLive && (
-                  <Pressable
-                    onPress={() => {
-                      setShowSpeedMenu(!showSpeedMenu);
-                      showControlsWithTimeout();
-                    }}
-                    {...getTvProps('btn-settings', [styles.iconBtn, isPortrait && styles.iconBtnPortrait])}
-                  >
-                    <Feather name="settings" size={isPortrait ? 18 : 22} color="#fff" />
-                  </Pressable>
-                )}
-
-                {/* Device Info Indicator with Accurate Battery Status */}
-                <Text style={styles.deviceInfoText}>
-                  {systemTime} · {batteryLevel}%
-                </Text>
-
-                {/* Right Switcher Categories Drawer Trigger */}
-                {channels && channels.length > 0 && (
-                  <Pressable
-                    onPress={() => {
-                      setRightDrawerOpen(true);
-                      showControlsWithTimeout();
-                    }}
-                    {...getTvProps('btn-list', [styles.iconBtn, isPortrait && styles.iconBtnPortrait, { marginLeft: isPortrait ? 8 : 12 }])}
-                  >
-                    <Feather name="list" size={isPortrait ? 18 : 22} color="#fff" />
-                  </Pressable>
-                )}
-              </View>
-            </View>
-            )}
-
-            {/* Playback Settings Dropdown */}
-            {showSpeedMenu && !isLive && (
-              <View style={[
-                styles.speedMenu,
-                {
-                  top: Math.max(65, 50 + insets.top),
-                  right: Math.max(20, insets.right) + 50,
-                }
-              ]}>
-                <Text style={styles.settingsSectionTitle}>Playback Speed</Text>
-                <View style={styles.settingsRow}>
-                  {SPEEDS.map((sp) => (
-                    <TouchableOpacity
-                      key={sp}
-                      onPress={() => changeSpeed(sp)}
-                      {...getTvProps('speed-' + sp, [styles.settingsOption, speed === sp && styles.settingsOptionActive])}
-                    >
-                      <Text style={[styles.settingsText, speed === sp && styles.settingsTextActive]}>
-                        {sp === 1.0 ? 'Normal' : `${sp}x`}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-
-
-              </View>
-            )}
-
-            {/* Middle Play/Pause Assist Button centered strictly */}
-            {!isPlaying && !isLive && (
+            {/* Left edge touch area to open channels list */}
+            {!isLocked && !rightDrawerOpen && (
               <TouchableOpacity
-                onPress={handlePlayPause}
-                activeOpacity={0.8}
-                {...getTvProps('btn-mid-play', [styles.midPlayBtn, isPortrait && styles.midPlayBtnPortrait])}
-              >
-                <Feather name="play" size={isPortrait ? 32 : 44} color="#FF0000" style={{ marginLeft: isPortrait ? 4 : 6 }} />
-              </TouchableOpacity>
+                style={styles.leftEdgeTouchZone}
+                activeOpacity={1}
+                onPress={() => {
+                  setRightDrawerOpen(true);
+                  showControlsWithTimeout();
+                }}
+              />
             )}
 
-            {/* Bottom Controls Area (HTML structure matched) */}
-            {!isLive && (
-              <View style={[
-                styles.bottomControls,
-                {
-                  paddingBottom: Math.max(15, insets.bottom),
-                  paddingLeft: Math.max(20, insets.left),
-                  paddingRight: Math.max(20, insets.right)
-                }
-              ]}>
-              {/* VOD Progress Bar and Time labels */}
-              {!isLive && (
-                <View style={styles.progressBlock}>
-                  <View style={styles.ptimeRow}>
-                    <Text style={styles.timeText}>
-                      {formatTime(status.positionMillis)}
+            {/* Right edge touch area to open channels list */}
+            {!isLocked && !rightDrawerOpen && (
+              <TouchableOpacity
+                style={styles.rightEdgeTouchZone}
+                activeOpacity={1}
+                onPress={() => {
+                  setRightDrawerOpen(true);
+                  showControlsWithTimeout();
+                }}
+              />
+            )}
+
+            {/* Loading Spinner overlay */}
+            {isLoading && (
+              <View style={styles.spinnerWrapper} pointerEvents="none">
+                <ActivityIndicator size="large" color="#FF0000" />
+                <Text style={styles.loadingText}>Loading Stream...</Text>
+              </View>
+            )}
+
+            {/* Dynamic HUD Indicator Capsule (Gestures & Orientation matched) */}
+            {hudVisible && (
+              <View
+                style={(hudType === 'volume' || hudType === 'brightness' || hudType === 'aspect') ? styles.hudSimpleContainer : styles.hudContainer}
+                pointerEvents="none"
+              >
+                {hudType === 'volume' || hudType === 'brightness' || hudType === 'aspect' ? (
+                  <Text style={styles.hudSimpleText}>
+                    {hudType === 'volume'
+                      ? `Volume: ${Math.round(volume * 100)}%`
+                      : hudType === 'brightness'
+                        ? `Brightness: ${Math.round(brightness * 100)}%`
+                        : `Aspect: ${RESIZE_LABELS[resizeModeIndex]}`}
+                  </Text>
+                ) : (
+                  <>
+                    <Feather
+                      name={
+                        hudType === 'auto_rotate'
+                          ? 'rotate-cw'
+                          : hudType === 'lock_landscape'
+                            ? 'video'
+                            : 'smartphone'
+                      }
+                      size={24}
+                      color="#FF0000"
+                      style={{ marginBottom: 8 }}
+                    />
+                    <Text style={styles.hudText}>
+                      {hudType === 'auto_rotate'
+                        ? 'Auto Rotate'
+                        : hudType === 'lock_landscape'
+                          ? 'Landscape Locked'
+                          : 'Portrait Locked'}
                     </Text>
-                    <Text style={styles.timeText}>
-                      {formatTime(status.durationMillis)}
-                    </Text>
-                  </View>
+                  </>
+                )}
+              </View>
+            )}
 
-                  {/* HTML style Seekbar */}
-                  <TouchableOpacity
-                    style={styles.seekBarWrapper}
-                    activeOpacity={1}
-                    onPress={handleSeekBarTouch}
-                    onLayout={(e) => setSeekBarWidth(e.nativeEvent.layout.width)}
-                  >
-                    <View style={styles.seekBarBg}>
-                      <View style={[styles.seekBarFill, { width: `${progress}%` }]} />
-                      <View style={[styles.seekBarKnob, { left: `${progress}%` }]} />
-                    </View>
-                  </TouchableOpacity>
+            {/* Double-Tap Seeking overlay indicator */}
+            {seekIndicator && (
+              <View style={styles.seekIndicatorContainer} pointerEvents="none">
+                <View style={styles.seekIndicatorCircle}>
+                  <Feather
+                    name={seekIndicator === 'forward' ? 'chevrons-right' : 'chevrons-left'}
+                    size={32}
+                    color="#fff"
+                  />
+                  <Text style={styles.seekIndicatorText}>
+                    {seekIndicator === 'forward' ? '+10s' : '-10s'}
+                  </Text>
                 </View>
-              )}
+              </View>
+            )}
 
-              {/* LIVE Stream overlay layout */}
-              {isLive && (
-                <View style={styles.liveContainer}>
-                  <View style={styles.liveDot} />
-                  <Text style={styles.liveText}>LIVE STREAM</Text>
-                </View>
-              )}
-
-              {/* Control Action Buttons Row */}
-              {isPortrait ? (
-                <View style={styles.portraitControlsWrapper}>
-                  {/* Row 1: Lock Button & Right Actions */}
-                  <View style={styles.portraitTopRow}>
-                    <TouchableOpacity
-                      onPress={() => {
-                        setIsLocked(true);
-                        setControlsVisible(false);
-                        setLockBtnVisible(true);
-                      }}
-                      activeOpacity={0.7}
-                      {...getTvProps('btn-lock', [styles.lockBtn, styles.lockBtnPortrait])}
-                    >
-                      <Feather name="lock" size={20} color="#fff" />
-                    </TouchableOpacity>
-
-                    <View style={[styles.rightActionsRow, styles.rightActionsRowPortrait]}>
-                      <TouchableOpacity
-                        onPress={toggleMute}
-                        activeOpacity={0.7}
-                        {...getTvProps('btn-mute', [styles.actionIconBtn, styles.actionIconBtnPortrait])}
-                      >
-                        <Feather
-                          name={isMuted || volume === 0 ? 'volume-x' : 'volume-2'}
-                          size={20}
-                          color="#fff"
-                        />
-                      </TouchableOpacity>
-
-                      {!isTVDevice && (
-                        <TouchableOpacity
-                          onPress={handlePopout}
-                          activeOpacity={0.7}
-                          {...getTvProps('btn-pip', [styles.actionIconBtn, styles.actionIconBtnPortrait, { marginLeft: 8 }])}
+            {/* Control Interface Overlay */}
+            {controlsVisible && !isLocked && (
+              <View style={[styles.overlayWrapper, isLive && { backgroundColor: 'transparent' }]} pointerEvents="box-none">
+                {/* Header section (HTML style matched) */}
+                {!isLive && (
+                  <View style={[
+                    styles.header,
+                    {
+                      paddingTop: Math.max(12, insets.top),
+                      paddingLeft: Math.max(20, insets.left),
+                      paddingRight: Math.max(20, insets.right)
+                    }
+                  ]}>
+                    <View style={styles.headerLeft}>
+                      {channels && channels.length > 0 && (
+                        <Pressable
+                          onPress={() => {
+                            setRightDrawerOpen(true);
+                            showControlsWithTimeout();
+                          }}
+                          {...getTvProps('btn-menu', [styles.iconBtn, isPortrait && styles.iconBtnPortrait])}
                         >
-                          <MaterialIcons name="picture-in-picture-alt" size={20} color="#fff" />
-                        </TouchableOpacity>
+                          <Feather name="menu" size={isPortrait ? 20 : 24} color="#fff" />
+                        </Pressable>
                       )}
 
-                      <TouchableOpacity
-                        onPress={cycleResizeMode}
-                        activeOpacity={0.7}
-                        {...getTvProps('btn-aspect', [styles.actionIconBtn, styles.actionIconBtnPortrait, { marginLeft: 8 }])}
+                      <Pressable
+                        onPress={handlePopout}
+                        {...getTvProps('btn-back', [styles.iconBtn, isPortrait && styles.iconBtnPortrait, { marginLeft: isPortrait ? 6 : 10 }])}
                       >
-                        <MaterialIcons name="aspect-ratio" size={20} color="#fff" />
-                      </TouchableOpacity>
+                        <Feather name="arrow-left" size={isPortrait ? 20 : 24} color="#fff" />
+                      </Pressable>
+
+                      <Text style={styles.headerTitle} numberOfLines={1}>
+                        {currentTitle}
+                      </Text>
+                    </View>
+
+                    <View style={styles.headerRight}>
+                      {/* Cast Icon (Mocked) */}
+                      {!isLive && (
+                        <Feather name="cast" size={isPortrait ? 18 : 22} color="#fff" style={{ marginRight: 15 }} />
+                      )}
+
+                      {/* Settings Toggle */}
+                      {!isLive && (
+                        <Pressable
+                          onPress={() => {
+                            setShowSpeedMenu(!showSpeedMenu);
+                            showControlsWithTimeout();
+                          }}
+                          {...getTvProps('btn-settings', [styles.iconBtn, isPortrait && styles.iconBtnPortrait])}
+                        >
+                          <Feather name="settings" size={isPortrait ? 18 : 22} color="#fff" />
+                        </Pressable>
+                      )}
+
+                      {/* Device Info Indicator with Accurate Battery Status */}
+                      <Text style={styles.deviceInfoText}>
+                        {systemTime} · {batteryLevel}%
+                      </Text>
+
+                      {/* Right Switcher Categories Drawer Trigger */}
+                      {channels && channels.length > 0 && (
+                        <Pressable
+                          onPress={() => {
+                            setRightDrawerOpen(true);
+                            showControlsWithTimeout();
+                          }}
+                          {...getTvProps('btn-list', [styles.iconBtn, isPortrait && styles.iconBtnPortrait, { marginLeft: isPortrait ? 8 : 12 }])}
+                        >
+                          <Feather name="list" size={isPortrait ? 18 : 22} color="#fff" />
+                        </Pressable>
+                      )}
                     </View>
                   </View>
+                )}
 
-                  {/* Row 2: Playback Controls (Skip/Play/Seek) */}
-                  {!isLive && (
-                    <View style={styles.portraitBottomRow}>
-                      <TouchableOpacity
-                        onPress={() => {
-                          if (channels && channels.length > 0) {
-                            handlePreviousChannel();
-                          } else {
-                            seekTo(0);
-                          }
-                        }}
-                        disabled={isLive && (!channels || channels.length === 0)}
-                        {...getTvProps('btn-prev', [styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && (!channels || channels.length === 0) && { opacity: 0.25 }])}
-                      >
-                        <Feather name="skip-back" size={20} color="#fff" />
-                      </TouchableOpacity>
-
-                      <TouchableOpacity
-                        onPress={() => seekRelative(-10000)}
-                        disabled={isLive}
-                        {...getTvProps('btn-replay', [styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }])}
-                      >
-                        <MaterialIcons name="replay-10" size={22} color="#fff" />
-                      </TouchableOpacity>
-
-                      <TouchableOpacity
-                        onPress={handlePlayPause}
-                        activeOpacity={0.7}
-                        {...getTvProps('btn-play', [styles.mainPlayCircle, styles.mainPlayCirclePortrait])}
-                      >
-                        <Feather
-                          name={isPlaying ? 'pause' : 'play'}
-                          size={24}
-                          color="#fff"
-                          style={!isPlaying && { marginLeft: 3 }}
-                        />
-                      </TouchableOpacity>
-
-                      <TouchableOpacity
-                        onPress={() => seekRelative(10000)}
-                        disabled={isLive}
-                        {...getTvProps('btn-forward', [styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }])}
-                      >
-                        <MaterialIcons name="forward-10" size={22} color="#fff" />
-                      </TouchableOpacity>
-
-                      <TouchableOpacity
-                        onPress={() => {
-                          if (channels && channels.length > 0) {
-                            handleNextChannel();
-                          } else {
-                            seekTo(status.durationMillis || 0);
-                          }
-                        }}
-                        disabled={isLive && (!channels || channels.length === 0)}
-                        {...getTvProps('btn-next', [styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && (!channels || channels.length === 0) && { opacity: 0.25 }])}
-                      >
-                        <Feather name="skip-forward" size={20} color="#fff" />
-                      </TouchableOpacity>
+                {/* Playback Settings Dropdown */}
+                {showSpeedMenu && !isLive && (
+                  <View style={[
+                    styles.speedMenu,
+                    {
+                      top: Math.max(65, 50 + insets.top),
+                      right: Math.max(20, insets.right) + 50,
+                    }
+                  ]}>
+                    <Text style={styles.settingsSectionTitle}>Playback Speed</Text>
+                    <View style={styles.settingsRow}>
+                      {SPEEDS.map((sp) => (
+                        <TouchableOpacity
+                          key={sp}
+                          onPress={() => changeSpeed(sp)}
+                          {...getTvProps('speed-' + sp, [styles.settingsOption, speed === sp && styles.settingsOptionActive])}
+                        >
+                          <Text style={[styles.settingsText, speed === sp && styles.settingsTextActive]}>
+                            {sp === 1.0 ? 'Normal' : `${sp}x`}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
                     </View>
-                  )}
-                </View>
-              ) : (
-                <View style={styles.controlButtonsRow}>
-                  {/* Lock Trigger Button */}
+
+
+                  </View>
+                )}
+
+                {/* Middle Play/Pause Assist Button centered strictly */}
+                {!isPlaying && !isLive && (
                   <TouchableOpacity
-                    onPress={() => {
-                      setIsLocked(true);
-                      setControlsVisible(false);
-                      setLockBtnVisible(true);
-                    }}
-                    activeOpacity={0.7}
-                    {...getTvProps('btn-lock', [styles.lockBtn, isPortrait && styles.lockBtnPortrait])}
+                    onPress={handlePlayPause}
+                    activeOpacity={0.8}
+                    {...getTvProps('btn-mid-play', [styles.midPlayBtn, isPortrait && styles.midPlayBtnPortrait])}
                   >
-                    <Feather name="lock" size={isPortrait ? 20 : 24} color="#fff" />
+                    <Feather name="play" size={isPortrait ? 32 : 44} color="#FF0000" style={{ marginLeft: isPortrait ? 4 : 6 }} />
                   </TouchableOpacity>
+                )}
 
-                  {/* Main Player Skip / Rewind / Play Controls (HTML styled) */}
-                  {!isLive && (
-                    <View style={[styles.pctrl, isPortrait && styles.pctrlPortrait]}>
-                      <TouchableOpacity
-                        onPress={() => {
-                          if (channels && channels.length > 0) {
-                            handlePreviousChannel();
-                          } else {
-                            seekTo(0);
-                          }
-                        }}
-                        disabled={isLive && (!channels || channels.length === 0)}
-                        {...getTvProps('btn-prev', [
-                          styles.ctrlIconBtn,
-                          isPortrait && styles.ctrlIconBtnPortrait,
-                          isLive && (!channels || channels.length === 0) && { opacity: 0.25 }
-                        ])}
-                      >
-                        <Feather name="skip-back" size={isPortrait ? 20 : 24} color="#fff" />
-                      </TouchableOpacity>
+                {/* Bottom Controls Area (HTML structure matched) */}
+                {!isLive && (
+                  <View style={[
+                    styles.bottomControls,
+                    {
+                      paddingBottom: Math.max(15, insets.bottom),
+                      paddingLeft: Math.max(20, insets.left),
+                      paddingRight: Math.max(20, insets.right)
+                    }
+                  ]}>
+                    {/* VOD Progress Bar and Time labels */}
+                    {!isLive && (
+                      <View style={styles.progressBlock}>
+                        <View style={styles.ptimeRow}>
+                          <Text style={styles.timeText}>
+                            {formatTime(status.positionMillis)}
+                          </Text>
+                          <Text style={styles.timeText}>
+                            {formatTime(status.durationMillis)}
+                          </Text>
+                        </View>
 
-                      <TouchableOpacity
-                        onPress={() => seekRelative(-10000)}
-                        disabled={isLive}
-                        {...getTvProps('btn-replay', [styles.ctrlIconBtn, isPortrait && styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }])}
-                      >
-                        <MaterialIcons name="replay-10" size={isPortrait ? 22 : 26} color="#fff" />
-                      </TouchableOpacity>
-
-                      {/* Main Play Circle Icon */}
-                      <TouchableOpacity
-                        onPress={handlePlayPause}
-                        activeOpacity={0.7}
-                        {...getTvProps('btn-play', [styles.mainPlayCircle, isPortrait && styles.mainPlayCirclePortrait])}
-                      >
-                        <Feather
-                          name={isPlaying ? 'pause' : 'play'}
-                          size={isPortrait ? 24 : 30}
-                          color="#fff"
-                          style={!isPlaying && { marginLeft: isPortrait ? 3 : 5 }}
-                        />
-                      </TouchableOpacity>
-
-                      <TouchableOpacity
-                        onPress={() => seekRelative(10000)}
-                        disabled={isLive}
-                        {...getTvProps('btn-forward', [styles.ctrlIconBtn, isPortrait && styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }])}
-                      >
-                        <MaterialIcons name="forward-10" size={isPortrait ? 22 : 26} color="#fff" />
-                      </TouchableOpacity>
-
-                      <TouchableOpacity
-                        onPress={() => {
-                          if (channels && channels.length > 0) {
-                            handleNextChannel();
-                          } else {
-                            seekTo(status.durationMillis || 0);
-                          }
-                        }}
-                        disabled={isLive && (!channels || channels.length === 0)}
-                        {...getTvProps('btn-next', [
-                          styles.ctrlIconBtn,
-                          isPortrait && styles.ctrlIconBtnPortrait,
-                          isLive && (!channels || channels.length === 0) && { opacity: 0.25 }
-                        ])}
-                      >
-                        <Feather name="skip-forward" size={isPortrait ? 20 : 24} color="#fff" />
-                      </TouchableOpacity>
-                    </View>
-                  )}
-
-                  {/* Right controls layout (Volume, Aspect Ratio) */}
-                  <View style={[styles.rightActionsRow, isPortrait && styles.rightActionsRowPortrait]}>
-                    <TouchableOpacity
-                      onPress={toggleMute}
-                      activeOpacity={0.7}
-                      {...getTvProps('btn-mute', [styles.actionIconBtn, isPortrait && styles.actionIconBtnPortrait])}
-                    >
-                      <Feather
-                        name={isMuted || volume === 0 ? 'volume-x' : 'volume-2'}
-                        size={isPortrait ? 20 : 24}
-                        color="#fff"
-                      />
-                    </TouchableOpacity>
-
-                    {/* Popout / Picture-in-Picture Button */}
-                    {!isTVDevice && (
-                      <TouchableOpacity
-                        onPress={handlePopout}
-                        activeOpacity={0.7}
-                        {...getTvProps('btn-pip', [
-                          styles.actionIconBtn,
-                          isPortrait && styles.actionIconBtnPortrait,
-                          { marginLeft: isPortrait ? 8 : 15 }
-                        ])}
-                      >
-                        <MaterialIcons name="picture-in-picture-alt" size={isPortrait ? 20 : 24} color="#fff" />
-                      </TouchableOpacity>
+                        {/* HTML style Seekbar */}
+                        <TouchableOpacity
+                          style={styles.seekBarWrapper}
+                          activeOpacity={1}
+                          onPress={handleSeekBarTouch}
+                          onLayout={(e) => setSeekBarWidth(e.nativeEvent.layout.width)}
+                        >
+                          <View style={styles.seekBarBg}>
+                            <View style={[styles.seekBarFill, { width: `${progress}%` }]} />
+                            <View style={[styles.seekBarKnob, { left: `${progress}%` }]} />
+                          </View>
+                        </TouchableOpacity>
+                      </View>
                     )}
 
-                    {/* Aspect Ratio Button to toggle fit/fill/stretch */}
-                    <TouchableOpacity
-                      onPress={cycleResizeMode}
-                      activeOpacity={0.7}
-                      {...getTvProps('btn-aspect', [
-                        styles.actionIconBtn,
-                        isPortrait && styles.actionIconBtnPortrait,
-                        { marginLeft: isPortrait ? 8 : 15 }
-                      ])}
-                    >
-                      <MaterialIcons
-                        name="aspect-ratio"
-                        size={isPortrait ? 20 : 24}
-                        color="#fff"
-                      />
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              )}
-            </View>
-            )}
-          </View>
-        )}
+                    {/* LIVE Stream overlay layout */}
+                    {isLive && (
+                      <View style={styles.liveContainer}>
+                        <View style={styles.liveDot} />
+                        <Text style={styles.liveText}>LIVE STREAM</Text>
+                      </View>
+                    )}
 
-        {/* Lock Overlay screen HUD */}
-        {(isLocked && (lockBtnVisible || controlsVisible)) && (
-          <TouchableOpacity
-            style={styles.lockOverlay}
-            activeOpacity={1}
-            onPress={toggleControls}
-          >
-            <TouchableOpacity
-              onPress={() => {
-                setIsLocked(false);
-                setControlsVisible(true);
-                showControlsWithTimeout();
-              }}
-              activeOpacity={0.7}
-              {...getTvProps('btn-unlock', [styles.lockBtnFloating])}
-            >
-              <Feather name="lock" size={20} color="#FF0000" />
-              <Text style={styles.lockHintText}>Tap to Unlock</Text>
-            </TouchableOpacity>
-          </TouchableOpacity>
-        )}
+                    {/* Control Action Buttons Row */}
+                    {isPortrait ? (
+                      <View style={styles.portraitControlsWrapper}>
+                        {/* Row 1: Lock Button & Right Actions */}
+                        <View style={styles.portraitTopRow}>
+                          <TouchableOpacity
+                            onPress={() => {
+                              setIsLocked(true);
+                              setControlsVisible(false);
+                              setLockBtnVisible(true);
+                            }}
+                            activeOpacity={0.7}
+                            {...getTvProps('btn-lock', [styles.lockBtn, styles.lockBtnPortrait])}
+                          >
+                            <Feather name="lock" size={20} color="#fff" />
+                          </TouchableOpacity>
+
+                          <View style={[styles.rightActionsRow, styles.rightActionsRowPortrait]}>
+                            <TouchableOpacity
+                              onPress={toggleMute}
+                              activeOpacity={0.7}
+                              {...getTvProps('btn-mute', [styles.actionIconBtn, styles.actionIconBtnPortrait])}
+                            >
+                              <Feather
+                                name={isMuted || volume === 0 ? 'volume-x' : 'volume-2'}
+                                size={20}
+                                color="#fff"
+                              />
+                            </TouchableOpacity>
+
+                            {!isTVDevice && (
+                              <TouchableOpacity
+                                onPress={handlePopout}
+                                activeOpacity={0.7}
+                                {...getTvProps('btn-pip', [styles.actionIconBtn, styles.actionIconBtnPortrait, { marginLeft: 8 }])}
+                              >
+                                <MaterialIcons name="picture-in-picture-alt" size={20} color="#fff" />
+                              </TouchableOpacity>
+                            )}
+
+                            <TouchableOpacity
+                              onPress={cycleResizeMode}
+                              activeOpacity={0.7}
+                              {...getTvProps('btn-aspect', [styles.actionIconBtn, styles.actionIconBtnPortrait, { marginLeft: 8 }])}
+                            >
+                              <MaterialIcons name="aspect-ratio" size={20} color="#fff" />
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+
+                        {/* Row 2: Playback Controls (Skip/Play/Seek) */}
+                        {!isLive && (
+                          <View style={styles.portraitBottomRow}>
+                            <TouchableOpacity
+                              onPress={() => {
+                                if (channels && channels.length > 0) {
+                                  handlePreviousChannel();
+                                } else {
+                                  seekTo(0);
+                                }
+                              }}
+                              disabled={isLive && (!channels || channels.length === 0)}
+                              {...getTvProps('btn-prev', [styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && (!channels || channels.length === 0) && { opacity: 0.25 }])}
+                            >
+                              <Feather name="skip-back" size={20} color="#fff" />
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                              onPress={() => seekRelative(-10000)}
+                              disabled={isLive}
+                              {...getTvProps('btn-replay', [styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }])}
+                            >
+                              <MaterialIcons name="replay-10" size={22} color="#fff" />
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                              onPress={handlePlayPause}
+                              activeOpacity={0.7}
+                              {...getTvProps('btn-play', [styles.mainPlayCircle, styles.mainPlayCirclePortrait])}
+                            >
+                              <Feather
+                                name={isPlaying ? 'pause' : 'play'}
+                                size={24}
+                                color="#fff"
+                                style={!isPlaying && { marginLeft: 3 }}
+                              />
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                              onPress={() => seekRelative(10000)}
+                              disabled={isLive}
+                              {...getTvProps('btn-forward', [styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }])}
+                            >
+                              <MaterialIcons name="forward-10" size={22} color="#fff" />
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                              onPress={() => {
+                                if (channels && channels.length > 0) {
+                                  handleNextChannel();
+                                } else {
+                                  seekTo(status.durationMillis || 0);
+                                }
+                              }}
+                              disabled={isLive && (!channels || channels.length === 0)}
+                              {...getTvProps('btn-next', [styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && (!channels || channels.length === 0) && { opacity: 0.25 }])}
+                            >
+                              <Feather name="skip-forward" size={20} color="#fff" />
+                            </TouchableOpacity>
+                          </View>
+                        )}
+                      </View>
+                    ) : (
+                      <View style={styles.controlButtonsRow}>
+                        {/* Lock Trigger Button */}
+                        <TouchableOpacity
+                          onPress={() => {
+                            setIsLocked(true);
+                            setControlsVisible(false);
+                            setLockBtnVisible(true);
+                          }}
+                          activeOpacity={0.7}
+                          {...getTvProps('btn-lock', [styles.lockBtn, isPortrait && styles.lockBtnPortrait])}
+                        >
+                          <Feather name="lock" size={isPortrait ? 20 : 24} color="#fff" />
+                        </TouchableOpacity>
+
+                        {/* Main Player Skip / Rewind / Play Controls (HTML styled) */}
+                        {!isLive && (
+                          <View style={[styles.pctrl, isPortrait && styles.pctrlPortrait]}>
+                            <TouchableOpacity
+                              onPress={() => {
+                                if (channels && channels.length > 0) {
+                                  handlePreviousChannel();
+                                } else {
+                                  seekTo(0);
+                                }
+                              }}
+                              disabled={isLive && (!channels || channels.length === 0)}
+                              {...getTvProps('btn-prev', [
+                                styles.ctrlIconBtn,
+                                isPortrait && styles.ctrlIconBtnPortrait,
+                                isLive && (!channels || channels.length === 0) && { opacity: 0.25 }
+                              ])}
+                            >
+                              <Feather name="skip-back" size={isPortrait ? 20 : 24} color="#fff" />
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                              onPress={() => seekRelative(-10000)}
+                              disabled={isLive}
+                              {...getTvProps('btn-replay', [styles.ctrlIconBtn, isPortrait && styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }])}
+                            >
+                              <MaterialIcons name="replay-10" size={isPortrait ? 22 : 26} color="#fff" />
+                            </TouchableOpacity>
+
+                            {/* Main Play Circle Icon */}
+                            <TouchableOpacity
+                              onPress={handlePlayPause}
+                              activeOpacity={0.7}
+                              {...getTvProps('btn-play', [styles.mainPlayCircle, isPortrait && styles.mainPlayCirclePortrait])}
+                            >
+                              <Feather
+                                name={isPlaying ? 'pause' : 'play'}
+                                size={isPortrait ? 24 : 30}
+                                color="#fff"
+                                style={!isPlaying && { marginLeft: isPortrait ? 3 : 5 }}
+                              />
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                              onPress={() => seekRelative(10000)}
+                              disabled={isLive}
+                              {...getTvProps('btn-forward', [styles.ctrlIconBtn, isPortrait && styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }])}
+                            >
+                              <MaterialIcons name="forward-10" size={isPortrait ? 22 : 26} color="#fff" />
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                              onPress={() => {
+                                if (channels && channels.length > 0) {
+                                  handleNextChannel();
+                                } else {
+                                  seekTo(status.durationMillis || 0);
+                                }
+                              }}
+                              disabled={isLive && (!channels || channels.length === 0)}
+                              {...getTvProps('btn-next', [
+                                styles.ctrlIconBtn,
+                                isPortrait && styles.ctrlIconBtnPortrait,
+                                isLive && (!channels || channels.length === 0) && { opacity: 0.25 }
+                              ])}
+                            >
+                              <Feather name="skip-forward" size={isPortrait ? 20 : 24} color="#fff" />
+                            </TouchableOpacity>
+                          </View>
+                        )}
+
+                        {/* Right controls layout (Volume, Aspect Ratio) */}
+                        <View style={[styles.rightActionsRow, isPortrait && styles.rightActionsRowPortrait]}>
+                          <TouchableOpacity
+                            onPress={toggleMute}
+                            activeOpacity={0.7}
+                            {...getTvProps('btn-mute', [styles.actionIconBtn, isPortrait && styles.actionIconBtnPortrait])}
+                          >
+                            <Feather
+                              name={isMuted || volume === 0 ? 'volume-x' : 'volume-2'}
+                              size={isPortrait ? 20 : 24}
+                              color="#fff"
+                            />
+                          </TouchableOpacity>
+
+                          {/* Popout / Picture-in-Picture Button */}
+                          {!isTVDevice && (
+                            <TouchableOpacity
+                              onPress={handlePopout}
+                              activeOpacity={0.7}
+                              {...getTvProps('btn-pip', [
+                                styles.actionIconBtn,
+                                isPortrait && styles.actionIconBtnPortrait,
+                                { marginLeft: isPortrait ? 8 : 15 }
+                              ])}
+                            >
+                              <MaterialIcons name="picture-in-picture-alt" size={isPortrait ? 20 : 24} color="#fff" />
+                            </TouchableOpacity>
+                          )}
+
+                          {/* Aspect Ratio Button to toggle fit/fill/stretch */}
+                          <TouchableOpacity
+                            onPress={cycleResizeMode}
+                            activeOpacity={0.7}
+                            {...getTvProps('btn-aspect', [
+                              styles.actionIconBtn,
+                              isPortrait && styles.actionIconBtnPortrait,
+                              { marginLeft: isPortrait ? 8 : 15 }
+                            ])}
+                          >
+                            <MaterialIcons
+                              name="aspect-ratio"
+                              size={isPortrait ? 20 : 24}
+                              color="#fff"
+                            />
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    )}
+                  </View>
+                )}
+              </View>
+            )}
+
+            {/* Lock Overlay screen HUD */}
+            {(isLocked && (lockBtnVisible || controlsVisible)) && (
+              <TouchableOpacity
+                style={styles.lockOverlay}
+                activeOpacity={1}
+                onPress={toggleControls}
+              >
+                <TouchableOpacity
+                  onPress={() => {
+                    setIsLocked(false);
+                    setControlsVisible(true);
+                    showControlsWithTimeout();
+                  }}
+                  activeOpacity={0.7}
+                  {...getTvProps('btn-unlock', [styles.lockBtnFloating])}
+                >
+                  <Feather name="lock" size={20} color="#FF0000" />
+                  <Text style={styles.lockHintText}>Tap to Unlock</Text>
+                </TouchableOpacity>
+              </TouchableOpacity>
+            )}
           </>
         )}
       </View>
@@ -1588,7 +1658,7 @@ export default function PlayerScreen({ route, navigation }) {
       {/* Unified Channels & Categories Switcher Drawer Sidebar */}
       {rightDrawerOpen && channels && channels.length > 0 && !isInPip && (
         <View style={styles.drawerWrapper}>
-          <View style={[styles.leftDrawerPanel, { width: Math.min(380, width * 0.8), paddingTop: 0 }]}>
+          <View style={[styles.leftDrawerPanel, { width: 260, paddingTop: 0 }]}>
             <View style={{ flex: 1 }}>
               {/* Single Category Row */}
               <View style={styles.drawerCategoriesRow}>
@@ -1615,13 +1685,29 @@ export default function PlayerScreen({ route, navigation }) {
 
               {/* Vertical Channels List */}
               <FlatList
+                // ম্যাজিক ফিক্স: যখনই ড্রয়ার ওপেন হবে, এই key চেঞ্জ হবে এবং লিস্ট নতুন করে সঠিক পজিশনে রেন্ডার হবে
+                key={rightDrawerOpen ? 'drawer-open' : 'drawer-closed'} 
                 ref={channelsListRef}
                 getItemLayout={getItemLayout}
                 data={filteredChannels}
                 keyExtractor={(item) => item.id}
+                // ইনডেক্স খুঁজে বের করার লজিক একটু সেফ করে দিলাম
+                initialScrollIndex={
+                  filteredChannels.findIndex(c => String(c.id) === String(activeChannelId)) > 0 
+                    ? filteredChannels.findIndex(c => String(c.id) === String(activeChannelId)) 
+                    : 0
+                }
+                viewPosition={0} // লিস্টের একদম উপরে দেখাবে
                 contentContainerStyle={styles.drawerList}
                 showsVerticalScrollIndicator={false}
                 removeClippedSubviews={false}
+                // স্ক্রলিং ফেইল করলে যাতে অ্যাপ ক্র্যাশ না করে
+                onScrollToIndexFailed={(info) => {
+                  const wait = new Promise(resolve => setTimeout(resolve, 500));
+                  wait.then(() => {
+                    channelsListRef.current?.scrollToIndex({ index: info.index, animated: false });
+                  });
+                }}
                 ListEmptyComponent={
                   <View style={styles.emptyDrawerContainer}>
                     <Text style={styles.emptyDrawerText}>No channels in this category</Text>
@@ -2122,15 +2208,16 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
   },
   leftDrawerPanel: {
+    width: 260,
     height: '100%',
-    backgroundColor: 'rgba(10, 10, 10, 0.40)', // 60% transparent background (40% opacity)
+    backgroundColor: 'rgba(10, 10, 10, 0.25)',
     borderRightWidth: 1,
     borderRightColor: 'rgba(255, 255, 255, 0.1)',
     paddingTop: 0,
   },
   drawerPanel: {
     height: '100%',
-    backgroundColor: 'rgba(10, 10, 10, 0.40)', // 60% transparent background (40% opacity)
+    backgroundColor: 'rgba(10, 10, 10, 0.25)', // 60% transparent background (40% opacity)
     borderLeftWidth: 1,
     borderLeftColor: 'rgba(255, 255, 255, 0.1)',
     paddingTop: 15,
@@ -2222,10 +2309,11 @@ const styles = StyleSheet.create({
   drawerItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    height: 72,
+    height: 56,
     paddingHorizontal: 15,
     borderWidth: 3,
     borderColor: 'transparent',
+    borderBottomWidth: 0.5,
     borderBottomColor: '#1a1a1a',
     ...Platform.select({
       web: {
@@ -2237,24 +2325,24 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 200, 83, 0.08)',
   },
   drawerItemLogo: {
-    width: 48,
-    height: 48,
-    borderRadius: 8,
+    width: 36,
+    height: 36,
+    borderRadius: 6,
     marginRight: 12,
     resizeMode: 'contain',
     backgroundColor: '#fff',
   },
   drawerItemLogoPlaceholder: {
-    width: 48,
-    height: 48,
-    borderRadius: 8,
+    width: 36,
+    height: 36,
+    borderRadius: 6,
     marginRight: 12,
     justifyContent: 'center',
     alignItems: 'center',
   },
   drawerItemText: {
     color: '#aaa',
-    fontSize: 13,
+    fontSize: 15,
     fontWeight: '600',
     flex: 1,
   },

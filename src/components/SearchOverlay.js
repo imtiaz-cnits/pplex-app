@@ -18,7 +18,7 @@ import {
 import { Feather } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../context/ThemeContext';
-import { MOCK_MOVIES } from '../constants/mockData';
+import { fetchMovies, getImageUrl } from '../services/jellyfinApi';
 import { useOverlays } from '../context/OverlayContext';
 
 const CATEGORIES = ['All', 'Live TV', 'Movies', 'News', 'Sports', 'Entertainment'];
@@ -35,6 +35,7 @@ export default function SearchOverlay({ visible, onClose, navigation }) {
   const [results, setResults] = useState([]);
   const [activeCategory, setActiveCategory] = useState('All');
   const [isSearching, setIsSearching] = useState(false);
+  const [jellyfinMovies, setJellyfinMovies] = useState([]);
   const inputRef = useRef(null);
   const debounceRef = useRef(null);
 
@@ -56,6 +57,15 @@ export default function SearchOverlay({ visible, onClose, navigation }) {
 
   useEffect(() => {
     if (visible) {
+      const loadMovies = async () => {
+        try {
+          const data = await fetchMovies(150);
+          setJellyfinMovies(data);
+        } catch (err) {
+          console.log('Error fetching search movies:', err);
+        }
+      };
+      loadMovies();
       setTimeout(() => inputRef.current?.focus(), 300);
     } else {
       setQuery('');
@@ -85,11 +95,22 @@ export default function SearchOverlay({ visible, onClose, navigation }) {
         )
         .map(item => ({ ...item, type: 'channel' }));
 
-      let filteredMovies = MOCK_MOVIES.filter(
-        m =>
-          (m.title && m.title.toLowerCase().includes(q)) ||
-          (m.genre && m.genre.toLowerCase().includes(q))
-      ).map(item => ({ ...item, type: 'movie' }));
+      let filteredMovies = jellyfinMovies
+        .filter(
+          m =>
+            (m.Name && m.Name.toLowerCase().includes(q)) ||
+            (m.Genres && m.Genres.some(g => g.toLowerCase().includes(q)))
+        )
+        .map(item => ({
+          ...item,
+          id: item.Id,
+          title: item.Name,
+          year: item.ProductionYear || (item.PremiereDate ? new Date(item.PremiereDate).getFullYear() : 'N/A'),
+          genre: item.Genres && item.Genres.length > 0 ? item.Genres[0] : 'Movie',
+          rating: item.CommunityRating ? item.CommunityRating.toFixed(1) : null,
+          image: getImageUrl(item.Id),
+          type: 'movie'
+        }));
 
       if (activeCategory === 'Live TV') {
         setResults(filteredChannels);
@@ -110,7 +131,7 @@ export default function SearchOverlay({ visible, onClose, navigation }) {
 
       setIsSearching(false);
     }, 300);
-  }, [query, channels, activeCategory]);
+  }, [query, channels, activeCategory, jellyfinMovies]);
 
   const handleItemPress = item => {
     onClose();
@@ -396,7 +417,7 @@ export default function SearchOverlay({ visible, onClose, navigation }) {
         {/* ── List — flex:1 so empty state is vertically centred ── */}
         <FlatList
           data={results}
-          keyExtractor={item => item.type + '-' + item.id}
+          keyExtractor={item => String(item.type + '-' + (item.id || item.Id || ''))}
           renderItem={renderItem}
           contentContainerStyle={
             results.length === 0

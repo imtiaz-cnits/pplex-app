@@ -6,6 +6,11 @@ export const CONFIG = {
   CURRENT_VERSION_CODE: 2,
 };
 
+// Jellyfin config
+export const JELLYFIN_URL = 'http://172.16.18.18';
+export const JELLYFIN_API_KEY = '27c22cfbb0e4419d8347515fd6e53bd3';
+export const JELLYFIN_USER_ID = 'e646a42b74cd466bbcd76c4640398b67';
+
 // 1. API Endpoint Base URL (change this to point to the live server)
 // In production, change this to your Next.js api domain or cPanel hosting domain.
 export const API_BASE_URL = 'http://172.19.19.130';

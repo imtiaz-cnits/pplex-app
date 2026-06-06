@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Platform, Animated, TouchableWithoutFeedback, useWindowDimensions, PanResponder } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, Platform, Animated, TouchableWithoutFeedback, useWindowDimensions, PanResponder, Dimensions } from 'react-native';
 import { Video, ResizeMode } from 'expo-av';
 import { Feather } from '@expo/vector-icons';
 import Sidebar from './Sidebar';
@@ -46,6 +46,14 @@ export default function OverlayManager() {
 
   const pan = useRef(new Animated.ValueXY()).current;
   const isDragging = useRef(false);
+  const pipPositionRef = useRef(0);
+  const pipVideoRef = useRef(null);
+
+  useEffect(() => {
+    if (pipVideoInfo) {
+      pipPositionRef.current = pipVideoInfo.resumePosition || 0;
+    }
+  }, [pipVideoInfo]);
 
   const panResponder = useRef(
     PanResponder.create({
@@ -63,8 +71,28 @@ export default function OverlayManager() {
       },
       onPanResponderMove: (evt, gestureState) => {
         isDragging.current = true;
-        pan.x.setValue(gestureState.dx);
-        pan.y.setValue(gestureState.dy);
+        
+        // Dynamically calculate boundaries to support screen rotations safely
+        const { width: currentScreenWidth, height: currentScreenHeight } = Dimensions.get('window');
+        const currentIsLargeScreen = Platform.isTV || currentScreenWidth > 900 || (currentScreenWidth > currentScreenHeight && Platform.OS === 'android');
+        const currentPipWidth = currentIsLargeScreen ? 380 : 210;
+        const currentPipHeight = currentIsLargeScreen ? 214 : 120;
+        const rightOffset = currentIsLargeScreen ? 25 : 20;
+        const bottomOffset = 95;
+        
+        const targetX = pan.x._offset + gestureState.dx;
+        const targetY = pan.y._offset + gestureState.dy;
+        
+        const minX = -(currentScreenWidth - rightOffset - currentPipWidth);
+        const maxX = rightOffset;
+        const minY = -(currentScreenHeight - bottomOffset - currentPipHeight);
+        const maxY = bottomOffset;
+        
+        const clampedX = Math.max(minX, Math.min(maxX, targetX));
+        const clampedY = Math.max(minY, Math.min(maxY, targetY));
+        
+        pan.x.setValue(clampedX - pan.x._offset);
+        pan.y.setValue(clampedY - pan.y._offset);
       },
       onPanResponderRelease: (evt, gestureState) => {
         pan.flattenOffset();
@@ -178,23 +206,24 @@ export default function OverlayManager() {
 
       {/* Picture-in-Picture Floating Player */}
       {pipActive && pipVideoInfo && (
-        <Animated.View 
+        <Animated.View
           {...panResponder.panHandlers}
           style={[
-            styles.pipContainer, 
-            { 
-              width: pipWidth, 
-              height: pipHeight, 
+            styles.pipContainer,
+            {
+              width: pipWidth,
+              height: pipHeight,
               right: isLargeScreen ? 25 : 20,
               transform: [
                 { translateX: Animated.add(pan.x, translateXVal) },
                 { translateY: pan.y },
                 { scale: scaleVal }
-              ] 
+              ]
             }
           ]}
         >
           <Video
+            ref={pipVideoRef}
             source={{ uri: pipVideoInfo.streamUrl }}
             rate={1.0}
             volume={1.0}
@@ -203,13 +232,27 @@ export default function OverlayManager() {
             resizeMode={ResizeMode.CONTAIN}
             useNativeControls={false}
             staysActiveInBackground={true}
+            onLoad={() => {
+              if (pipVideoRef.current && pipVideoInfo?.resumePosition) {
+                pipVideoRef.current.setPositionAsync(pipVideoInfo.resumePosition);
+              }
+            }}
+            onError={(error) => {
+              console.log('PiP Video error:', error, 'for URL:', pipVideoInfo.streamUrl);
+            }}
+            onPlaybackStatusUpdate={(status) => {
+              if (status.isLoaded) {
+                pipPositionRef.current = status.positionMillis;
+              }
+            }}
             style={styles.pipVideo}
           />
           {/* PiP Overlay Controls */}
-          <Animated.View 
+          <Animated.View
             pointerEvents={isZoomed ? 'auto' : 'none'}
             style={[styles.pipControls, { opacity: opacityVal }]}
           >
+            {/* Centered Maximize Button */}
             <TouchableOpacity
               style={[styles.pipBtn, { width: pipBtnSize, height: pipBtnSize, borderRadius: pipBtnRadius }]}
               activeOpacity={0.7}
@@ -221,19 +264,22 @@ export default function OverlayManager() {
                   channels: pipVideoInfo.channels,
                   currentChannelId: pipVideoInfo.currentChannelId,
                   isLive: pipVideoInfo.isLive,
+                  resumePosition: pipPositionRef.current,
                 });
               }}
             >
               <Feather name="maximize-2" size={pipIconSize} color="#fff" />
             </TouchableOpacity>
+
+            {/* Top-Right Close Button */}
             <TouchableOpacity
               style={[
-                styles.pipBtn, 
-                { 
-                  backgroundColor: 'rgba(255, 61, 0, 0.9)', 
-                  width: pipBtnSize, 
-                  height: pipBtnSize, 
-                  borderRadius: pipBtnRadius 
+                styles.pipCloseBtn,
+                {
+                  backgroundColor: 'rgba(255, 61, 0, 0.9)',
+                  width: pipBtnSize,
+                  height: pipBtnSize,
+                  borderRadius: pipBtnRadius
                 }
               ]}
               activeOpacity={0.7}
@@ -243,7 +289,7 @@ export default function OverlayManager() {
             </TouchableOpacity>
           </Animated.View>
           {/* PiP Mini Title Banner */}
-          <Animated.View 
+          <Animated.View
             style={[styles.pipTitleBg, { opacity: opacityVal }]}
             pointerEvents="none"
           >
@@ -287,13 +333,24 @@ const styles = StyleSheet.create({
     height: '100%',
   },
   pipControls: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10000,
+  },
+  pipCloseBtn: {
     position: 'absolute',
     top: 6,
-    left: 6,
     right: 6,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    zIndex: 10000,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 0.5,
+    borderColor: 'rgba(255, 255, 255, 0.25)',
+    zIndex: 10001,
   },
   pipBtn: {
     width: 28,
