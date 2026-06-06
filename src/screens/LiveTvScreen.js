@@ -18,7 +18,13 @@ import { parseM3U } from '../utils/m3uParser';
 import { MOCK_CHANNELS } from '../constants/mockData';
 
 export default function LiveTvScreen({ navigation }) {
-  const { colors, theme } = useTheme();
+  const { colors: baseColors, theme } = useTheme();
+  const colors = {
+    ...baseColors,
+    primary: '#00C853',
+    primaryGrad: ['#00C853', '#007E33'],
+    primaryGlow: 'rgba(0, 200, 83, 0.35)',
+  };
   const { setIsLoading, channels, isOffNetwork, fetchGlobalPlaylist } = useOverlays();
   const [categories, setCategories] = useState(['All']);
   const [selectedCat, setSelectedCat] = useState('All');

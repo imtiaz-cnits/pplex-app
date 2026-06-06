@@ -164,7 +164,7 @@ export const OverlayProvider = ({ children }) => {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 4000);
-      const url = `http://172.19.19.130/version.json?t=${Date.now()}`;
+      const url = `${API_BASE_URL}/version.json?t=${Date.now()}`;
       
       const response = await fetch(url, { signal: controller.signal });
       clearTimeout(timeoutId);

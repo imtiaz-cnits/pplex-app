@@ -8,9 +8,13 @@ import {
   Image,
   Dimensions,
   TouchableOpacity,
+  Pressable,
   StatusBar,
   Platform,
   useWindowDimensions,
+  DeviceEventEmitter,
+  BackHandler,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -23,17 +27,313 @@ import { MOCK_CHANNELS, MOCK_MOVIES, MOCK_ACTORS } from '../constants/mockData';
 
 const { width } = Dimensions.get('window');
 const CAROUSEL_HEIGHT = Platform.isTV ? 320 : 200;
+const TV_LIVE_ROW_HEIGHT = 117;
+const TV_MOVIE_ROW_HEIGHT = 204;
 
 export default function HomeScreen({ navigation }) {
   const { colors, theme } = useTheme();
   const { setIsLoading, channels, fetchGlobalPlaylist, showComingSoon } = useOverlays();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
-  const isTV = Platform.isTV || screenWidth > 900;
+
+  const sWidth = (typeof screenWidth === 'number' && !isNaN(screenWidth) && screenWidth > 0) ? screenWidth : 960;
+  const sHeight = (typeof screenHeight === 'number' && !isNaN(screenHeight) && screenHeight > 0) ? screenHeight : 540;
+
+  const isTV = Platform.isTV || sWidth > 900 || (sWidth > sHeight && Platform.OS === 'android');
+
+  const tvContentWidth = sWidth - 70;
+  const numCols = 5;
+  const gridGap = 12;
+  const tvCardWidth = Math.floor((tvContentWidth - (numCols - 1) * gridGap) / numCols);
 
   const [tvSection, setTvSection] = useState('live');
   const [tvLiveCat, setTvLiveCat] = useState('All');
   const [tvMovieCat, setTvMovieCat] = useState('All');
-  const [focusedId, setFocusedId] = useState(null);
+  const [tvActiveSubScreen, setTvActiveSubScreen] = useState('hub');
+  const [debugLogs, setDebugLogs] = useState([]);
+  const [initialFocusDone, setInitialFocusDone] = useState(false);
+
+  useEffect(() => {
+    setInitialFocusDone(false);
+    const timer = setTimeout(() => {
+      setInitialFocusDone(true);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [tvActiveSubScreen]);
+
+  const [customFocusedKey, setCustomFocusedKey] = useState(isTV ? 'hub-0' : 'sidebar-0');
+  const tvGridRef = useRef(null);
+  const tvCatScrollRef = useRef(null);
+
+  const liveCategories = ['All', ...new Set(channels.map((c) => c.category?.trim()).filter(Boolean))];
+  const movieCategories = ['All', ...new Set(MOCK_MOVIES.map((m) => m.genre?.trim()).filter(Boolean))];
+
+  const activeCategories = tvSection === 'live' ? liveCategories : movieCategories;
+  const activeCategory = tvSection === 'live' ? tvLiveCat : tvMovieCat;
+  const setActiveCategory = tvSection === 'live' ? setTvLiveCat : setTvMovieCat;
+
+  const filteredItems = tvSection === 'live'
+    ? channels.filter((c) => tvLiveCat === 'All' || c.category?.trim() === tvLiveCat)
+    : MOCK_MOVIES.filter((m) => tvMovieCat === 'All' || m.genre?.trim() === tvMovieCat);
+
+  const customFocusedKeyRef = useRef(customFocusedKey);
+  const tvSectionRef = useRef(tvSection);
+  const activeCategoriesRef = useRef(activeCategories);
+  const filteredItemsRef = useRef(filteredItems);
+  const channelsRef = useRef(channels);
+  const tvActiveSubScreenRef = useRef(tvActiveSubScreen);
+  const isTVRef = useRef(isTV);
+
+  useEffect(() => { customFocusedKeyRef.current = customFocusedKey; }, [customFocusedKey]);
+  useEffect(() => { tvSectionRef.current = tvSection; }, [tvSection]);
+  useEffect(() => { activeCategoriesRef.current = activeCategories; }, [activeCategories]);
+  useEffect(() => { filteredItemsRef.current = filteredItems; }, [filteredItems]);
+  useEffect(() => { channelsRef.current = channels; }, [channels]);
+  useEffect(() => { tvActiveSubScreenRef.current = tvActiveSubScreen; }, [tvActiveSubScreen]);
+  useEffect(() => { isTVRef.current = isTV; }, [isTV]);
+
+  // Active Focus recovery to keep tvActiveSubScreen and customFocusedKey in sync
+  useEffect(() => {
+    if (isTV) {
+      if (tvActiveSubScreen === 'hub') {
+        if (!customFocusedKey || !customFocusedKey.startsWith('hub-')) {
+          console.log('[DEBUG] Focus Recovery: Resetting customFocusedKey to hub-0');
+          setCustomFocusedKey('hub-0');
+        }
+      } else if (tvActiveSubScreen === 'live_grid' || tvActiveSubScreen === 'movie_grid') {
+        if (!customFocusedKey || (!customFocusedKey.startsWith('grid-') && customFocusedKey !== 'back-btn')) {
+          console.log('[DEBUG] Focus Recovery: Resetting customFocusedKey to grid-0');
+          setCustomFocusedKey('grid-0');
+        }
+      }
+    }
+  }, [tvActiveSubScreen, isTV, customFocusedKey]);
+
+  // Custom TV D-Pad Focus Event Listener
+  useEffect(() => {
+    console.log('[DEBUG] HomeScreen mounted/rendered. isTV:', isTV, 'width:', screenWidth, 'height:', screenHeight, 'OS:', Platform.OS);
+  }, [isTV, screenWidth, screenHeight]);
+
+  // Custom TV D-Pad Focus Event Listener (using native device event emitter)
+  useEffect(() => {
+    console.log('[DEBUG] Enabling Custom onHWKeyEvent listener in HomeScreen (Unconditional)');
+
+    const subscription = DeviceEventEmitter.addListener('onHWKeyEvent', (evt) => {
+      try {
+        if (!evt) return;
+
+        const { eventType, eventKeyAction } = evt;
+        setDebugLogs((prev) => {
+          const logStr = `${new Date().toLocaleTimeString()}: ${eventType} (action: ${eventKeyAction})`;
+          return [logStr, ...prev].slice(0, 5);
+        });
+
+        console.log('[DEBUG] TV Key Event in HomeScreen:', eventType, 'action:', eventKeyAction);
+        if (eventKeyAction !== undefined && eventKeyAction !== 0) return;
+
+        const currentFocusedKey = String(customFocusedKeyRef.current || 'hub-0');
+        const currentTvSection = tvSectionRef.current;
+        const currentActiveCategories = activeCategoriesRef.current || [];
+        const currentFilteredItems = filteredItemsRef.current || [];
+        const currentTvActiveSubScreen = tvActiveSubScreenRef.current || 'hub';
+
+        if (
+          eventType === 'up' ||
+          eventType === 'down' ||
+          eventType === 'left' ||
+          eventType === 'right'
+        ) {
+          let nextKey = currentFocusedKey;
+
+          if (currentTvActiveSubScreen === 'hub') {
+            if (currentFocusedKey.startsWith('hub-')) {
+              const idx = parseInt(currentFocusedKey.split('-')[1], 10);
+              if (eventType === 'left') {
+                nextKey = `hub-${Math.max(0, idx - 1)}`;
+              } else if (eventType === 'right') {
+                nextKey = `hub-${Math.min(2, idx + 1)}`;
+              }
+            } else {
+              nextKey = 'hub-0';
+            }
+          }
+          else if (currentFocusedKey === 'back-btn') {
+            if (eventType === 'down') {
+              if (currentFilteredItems.length > 0) {
+                nextKey = 'grid-0';
+              }
+            }
+          }
+          else if (currentFocusedKey.startsWith('grid-')) {
+            const idx = parseInt(currentFocusedKey.split('-')[1], 10);
+            const cols = 5;
+
+            if (eventType === 'left') {
+              const col = idx % cols;
+              if (col > 0) {
+                nextKey = `grid-${idx - 1}`;
+              }
+            } else if (eventType === 'right') {
+              const col = idx % cols;
+              if (col < cols - 1 && idx + 1 < currentFilteredItems.length) {
+                nextKey = `grid-${idx + 1}`;
+              }
+            } else if (eventType === 'down') {
+              if (idx + cols < currentFilteredItems.length) {
+                nextKey = `grid-${idx + cols}`;
+              }
+            } else if (eventType === 'up') {
+              if (idx >= cols) {
+                nextKey = `grid-${idx - cols}`;
+              } else {
+                nextKey = 'back-btn';
+              }
+            }
+          }
+
+          if (nextKey !== currentFocusedKey) {
+            console.log('[DEBUG] Transitioning customFocusedKey from:', currentFocusedKey, 'to:', nextKey, 'on event:', eventType);
+            setCustomFocusedKey(nextKey);
+          } else {
+            console.log('[DEBUG] Focus key did not change from:', currentFocusedKey, 'on event:', eventType);
+          }
+        }
+        else if (eventType === 'select' || eventType === 'center' || eventType === 'playPause') {
+          console.log('[DEBUG] Select/Enter key pressed on key:', currentFocusedKey);
+          if (currentTvActiveSubScreen === 'hub') {
+            if (currentFocusedKey === 'hub-0') {
+              setTvSection('live');
+              setTvLiveCat('All');
+              setTvActiveSubScreen('live_grid');
+              setCustomFocusedKey('grid-0');
+            } else if (currentFocusedKey === 'hub-1') {
+              setTvSection('movies');
+              setTvMovieCat('All');
+              setTvActiveSubScreen('movie_grid');
+              setCustomFocusedKey('grid-0');
+            } else if (currentFocusedKey === 'hub-2') {
+              setIsLoading(true);
+              fetchGlobalPlaylist().finally(() => {
+                setIsLoading(false);
+              });
+            }
+          }
+          else if (currentFocusedKey === 'back-btn') {
+            setTvActiveSubScreen('hub');
+            setCustomFocusedKey(currentTvSection === 'live' ? 'hub-0' : 'hub-1');
+          }
+          else if (currentFocusedKey.startsWith('grid-')) {
+            const idx = parseInt(currentFocusedKey.split('-')[1], 10);
+            if (idx >= 0 && idx < currentFilteredItems.length) {
+              const item = currentFilteredItems[idx];
+              if (currentTvSection === 'live') {
+                navigation.navigate('Player', {
+                  streamUrl: item.streamUrl,
+                  title: item.name,
+                  channels: channelsRef.current,
+                  currentChannelId: item.id,
+                  isLive: true
+                });
+              } else {
+                navigation.navigate('Player', {
+                  streamUrl: item.streamUrl,
+                  title: item.title,
+                  channels: MOCK_MOVIES,
+                  currentChannelId: item.id,
+                  isLive: false
+                });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[ERROR] Error in onHWKeyEvent listener:', err);
+      }
+    });
+
+    return () => {
+      console.log('[DEBUG] Cleaning up Custom onHWKeyEvent listener in HomeScreen');
+      subscription.remove();
+    };
+  }, []);
+
+  // Auto-scroll ScrollViews/FlatLists on D-pad navigation
+  useEffect(() => {
+    if (!isTV) return;
+
+    const timer = setTimeout(() => {
+      try {
+        if (customFocusedKey.startsWith('grid-')) {
+          const idx = parseInt(customFocusedKey.split('-')[1], 10);
+          const rowIndex = Math.floor(idx / numCols);
+          const cardHeight = tvSection === 'live' ? tvCardWidth / 1.3 : tvCardWidth / 0.7;
+          const rowHeight = cardHeight + gridGap;
+          const targetOffset = Math.max(0, rowIndex * rowHeight - rowHeight);
+
+          tvGridRef.current?.scrollToOffset({
+            offset: targetOffset,
+            animated: false,
+          });
+        } else if (customFocusedKey.startsWith('category-')) {
+          const idx = parseInt(customFocusedKey.split('-')[1], 10);
+          tvCatScrollRef.current?.scrollTo({
+            x: Math.max(0, idx * 110 - 100),
+            animated: false,
+          });
+        }
+      } catch (err) {
+        console.log('[DEBUG] Auto-scroll error in HomeScreen:', err);
+      }
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, [customFocusedKey, isTV, tvSection, tvCardWidth]);
+
+  // Scroll to last focused item when screen gains focus
+  useEffect(() => {
+    const unsubscribeFocus = navigation.addListener('focus', () => {
+      if (isTV) {
+        const currentFocusedKey = customFocusedKeyRef.current;
+        if (currentFocusedKey.startsWith('grid-')) {
+          const idx = parseInt(currentFocusedKey.split('-')[1], 10);
+          const rowIndex = Math.floor(idx / numCols);
+          const cardHeight = tvSectionRef.current === 'live' ? tvCardWidth / 1.3 : tvCardWidth / 0.7;
+          const rowHeight = cardHeight + gridGap;
+          const targetOffset = Math.max(0, rowIndex * rowHeight - rowHeight);
+
+          setTimeout(() => {
+            try {
+              tvGridRef.current?.scrollToOffset({
+                offset: targetOffset,
+                animated: false,
+              });
+            } catch (err) {
+              console.log('[DEBUG] Focus listener scroll error in HomeScreen:', err);
+            }
+          }, 50);
+        }
+      }
+    });
+    return unsubscribeFocus;
+  }, [navigation, isTV, tvCardWidth]);
+
+  // TV remote hardware back button listener
+  useEffect(() => {
+    const backAction = () => {
+      if (isTV && tvActiveSubScreenRef.current !== 'hub') {
+        setTvActiveSubScreen('hub');
+        setCustomFocusedKey(tvSectionRef.current === 'live' ? 'hub-0' : 'hub-1');
+        return true;
+      }
+      return false;
+    };
+
+    const backHandler = BackHandler.addEventListener(
+      'hardwareBackPress',
+      backAction
+    );
+
+    return () => backHandler.remove();
+  }, [isTV]);
 
   const [activeSlide, setActiveSlide] = useState(0);
   const sliderRef = useRef(null);
@@ -138,7 +438,7 @@ export default function HomeScreen({ navigation }) {
         style={[
           styles.ring,
           { borderColor: colors.border, backgroundColor: colors.surface },
-          item.id === '1' && { borderColor: colors.primary, backgroundColor: theme === 'light' ? '#FFEBEB' : 'rgba(255, 0, 0, 0.1)' },
+          item.id === '1' && { borderColor: '#00C853', backgroundColor: theme === 'light' ? '#E8F5E9' : 'rgba(0, 200, 83, 0.1)' },
         ]}
       >
         {item.logoUrl ? (
@@ -147,7 +447,7 @@ export default function HomeScreen({ navigation }) {
           <Feather
             name={item.iconName === 'television' ? 'tv' : 'radio'}
             size={24}
-            color={item.id === '1' ? colors.primary : '#555'}
+            color={item.id === '1' ? '#00C853' : '#555'}
           />
         )}
       </View>
@@ -215,281 +515,310 @@ export default function HomeScreen({ navigation }) {
   );
 
   const renderTvLayout = () => {
-    const liveCategories = ['All', ...new Set(channels.map((c) => c.category?.trim()).filter(Boolean))];
-    const movieCategories = ['All', ...new Set(MOCK_MOVIES.map((m) => m.genre?.trim()).filter(Boolean))];
-
-    const activeCategories = tvSection === 'live' ? liveCategories : movieCategories;
-    const activeCategory = tvSection === 'live' ? tvLiveCat : tvMovieCat;
-    const setActiveCategory = tvSection === 'live' ? setTvLiveCat : setTvMovieCat;
-
-    const filteredItems = tvSection === 'live'
-      ? channels.filter((c) => tvLiveCat === 'All' || c.category === tvLiveCat)
-      : MOCK_MOVIES.filter((m) => tvMovieCat === 'All' || m.genre === tvMovieCat);
+    const focusColor = tvSection === 'live' ? '#00C853' : '#FF0000';
+    const focusBgColor = tvSection === 'live' ? 'rgba(0, 200, 83, 0.3)' : 'rgba(255, 0, 0, 0.3)';
 
     return (
-      <View style={[styles.tvContainer, { backgroundColor: colors.phBg }]}>
-        <StatusBar barStyle={theme === 'light' ? 'dark-content' : 'light-content'} backgroundColor={colors.phBg} />
+      <View style={{ flex: 1 }}>
+        {tvActiveSubScreen === 'hub' ? (
+          <View style={[styles.tvHubContainer, { backgroundColor: colors.phBg }]}>
+            <StatusBar barStyle={theme === 'light' ? 'dark-content' : 'light-content'} backgroundColor={colors.phBg} />
 
-        {/* Left Sidebar */}
-        <View style={[styles.tvSidebar, { backgroundColor: colors.surface, borderRightColor: colors.border }]}>
-          {/* Brand/Logo Area */}
-          <View style={styles.tvLogoArea}>
-            <View style={[
-              styles.tvLogoWrapper,
-              {
-                backgroundColor: theme === 'dark' ? 'rgba(0, 0, 0, 0.4)' : 'transparent',
-                borderColor: theme === 'dark' ? 'rgba(255, 255, 255, 0.1)' : 'transparent',
-                borderWidth: theme === 'dark' ? 1 : 0
-              }
-            ]}>
+            {/* Header section of Hub */}
+            <View style={styles.tvHubHeader}>
               <Image
-                source={tvSection === 'live' ? require('../../assets/logo_tv.png') : require('../../assets/logo_movie.png')}
-                style={{ width: 135, height: 42, resizeMode: 'contain' }}
+                source={require('../../assets/logo_tv.png')}
+                style={{ width: 180, height: 55, resizeMode: 'contain' }}
               />
-            </View>
-            <Text style={styles.tvLiveDot}>● ONLINE</Text>
-          </View>
-
-          {/* Navigation Links */}
-          <View style={styles.tvNavLinks}>
-            {/* Live TV Button */}
-            <TouchableOpacity
-              focusable={true}
-              activeOpacity={0.9}
-              onFocus={() => setFocusedId('tv-menu-live')}
-              onBlur={() => { if (focusedId === 'tv-menu-live') setFocusedId(null); }}
-              onPress={() => {
-                setTvSection('live');
-                setTvLiveCat('All');
-              }}
-              style={[
-                styles.tvSidebarBtn,
-                tvSection === 'live' && { backgroundColor: theme === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)' },
-                focusedId === 'tv-menu-live' && styles.tvSidebarBtnFocused
-              ]}
-            >
-              <Feather
-                name="tv"
-                size={18}
-                color={tvSection === 'live' || focusedId === 'tv-menu-live' ? '#FFD600' : colors.textSec}
-              />
-              <Text style={[
-                styles.tvSidebarBtnText,
-                { color: colors.textSec },
-                (tvSection === 'live' || focusedId === 'tv-menu-live') && [styles.tvSidebarBtnTextActive, { color: colors.text }]
-              ]}>Live TV</Text>
-            </TouchableOpacity>
-
-            {/* Movies & VOD Button */}
-            <TouchableOpacity
-              focusable={true}
-              activeOpacity={0.9}
-              onFocus={() => setFocusedId('tv-menu-movies')}
-              onBlur={() => { if (focusedId === 'tv-menu-movies') setFocusedId(null); }}
-              onPress={() => {
-                setTvSection('movies');
-                setTvMovieCat('All');
-              }}
-              style={[
-                styles.tvSidebarBtn,
-                tvSection === 'movies' && { backgroundColor: theme === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)' },
-                focusedId === 'tv-menu-movies' && styles.tvSidebarBtnFocused
-              ]}
-            >
-              <Feather
-                name="film"
-                size={18}
-                color={tvSection === 'movies' || focusedId === 'tv-menu-movies' ? '#FFD600' : colors.textSec}
-              />
-              <Text style={[
-                styles.tvSidebarBtnText,
-                { color: colors.textSec },
-                (tvSection === 'movies' || focusedId === 'tv-menu-movies') && [styles.tvSidebarBtnTextActive, { color: colors.text }]
-              ]}>Movies</Text>
-            </TouchableOpacity>
-
-            {/* Refresh Playlist Button */}
-            <TouchableOpacity
-              focusable={true}
-              activeOpacity={0.9}
-              onFocus={() => setFocusedId('tv-menu-refresh')}
-              onBlur={() => { if (focusedId === 'tv-menu-refresh') setFocusedId(null); }}
-              onPress={() => {
-                setIsLoading(true);
-                fetchGlobalPlaylist().finally(() => {
-                  setIsLoading(false);
-                });
-              }}
-              style={[
-                styles.tvSidebarBtn,
-                focusedId === 'tv-menu-refresh' && styles.tvSidebarBtnFocused
-              ]}
-            >
-              <Feather
-                name="refresh-cw"
-                size={18}
-                color={focusedId === 'tv-menu-refresh' ? '#FFD600' : colors.textSec}
-              />
-              <Text style={[
-                styles.tvSidebarBtnText,
-                { color: colors.textSec },
-                focusedId === 'tv-menu-refresh' && [styles.tvSidebarBtnTextActive, { color: colors.text }]
-              ]}>Refresh</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* Right Content Area */}
-        <View style={[styles.tvContentArea, { backgroundColor: colors.phBg }]}>
-          {/* Content Header: Title & Category Row */}
-          <View style={styles.tvHeader}>
-            <View>
-              <Text style={[styles.tvHeaderTitle, { color: colors.text }]}>
-                {tvSection === 'live' ? 'Live TV Channels' : 'Movies & Video Library'}
-              </Text>
-              <Text style={[styles.tvHeaderSubtitle, { color: colors.textSec }]}>
-                {tvSection === 'live'
-                  ? `${filteredItems.length} live streams available`
-                  : `${filteredItems.length} premium movies to watch`
-                }
+              <Text style={[styles.tvHubSubtitle, { color: colors.textSec }]}>
+                ● SYSTEM ONLINE • SELECT A SERVICE TO START STREAMING
               </Text>
             </View>
+
+            {/* Service Cards Container */}
+            <View style={styles.tvHubCardsRow}>
+              {/* Live TV Card */}
+              <Pressable
+                focusable={true}
+                hasTVPreferredFocus={isTV && customFocusedKey === 'hub-0'}
+                onFocus={() => {
+                  setCustomFocusedKey('hub-0');
+                }}
+                onPress={() => {
+                  setTvSection('live');
+                  setTvLiveCat('All');
+                  setTvActiveSubScreen('live_grid');
+                  setCustomFocusedKey('grid-0');
+                }}
+                style={[
+                  styles.tvHubCard,
+                  { backgroundColor: colors.surface, borderColor: colors.border },
+                  customFocusedKey === 'hub-0' && { borderColor: '#00C853', backgroundColor: '#00C853' }
+                ]}
+              >
+                <Feather
+                  name="tv"
+                  size={48}
+                  color={customFocusedKey === 'hub-0' ? '#000' : colors.textSec}
+                />
+                <Text style={[styles.tvHubCardTitle, { color: colors.text }]}>Live TV Channels</Text>
+                <Text style={[styles.tvHubCardDesc, { color: colors.textSec }]}>
+                  Watch local and international live streams
+                </Text>
+              </Pressable>
+
+              {/* Movies Card */}
+              <Pressable
+                focusable={true}
+                hasTVPreferredFocus={isTV && customFocusedKey === 'hub-1'}
+                onFocus={() => {
+                  setCustomFocusedKey('hub-1');
+                }}
+                onPress={() => {
+                  setTvSection('movies');
+                  setTvMovieCat('All');
+                  setTvActiveSubScreen('movie_grid');
+                  setCustomFocusedKey('grid-0');
+                }}
+                style={[
+                  styles.tvHubCard,
+                  { backgroundColor: colors.surface, borderColor: colors.border },
+                  customFocusedKey === 'hub-1' && { borderColor: '#FF0000', backgroundColor: '#FF0000' }
+                ]}
+              >
+                <Feather
+                  name="film"
+                  size={48}
+                  color={customFocusedKey === 'hub-1' ? '#fff' : colors.textSec}
+                />
+                <Text style={[styles.tvHubCardTitle, { color: colors.text }]}>Movies & VOD</Text>
+                <Text style={[styles.tvHubCardDesc, { color: colors.textSec }]}>
+                  Browse premium movies on demand
+                </Text>
+              </Pressable>
+
+              {/* Refresh Card */}
+              <Pressable
+                focusable={true}
+                hasTVPreferredFocus={isTV && customFocusedKey === 'hub-2'}
+                onFocus={() => {
+                  setCustomFocusedKey('hub-2');
+                }}
+                onPress={() => {
+                  setIsLoading(true);
+                  fetchGlobalPlaylist().finally(() => {
+                    setIsLoading(false);
+                  });
+                }}
+                style={[
+                  styles.tvHubCard,
+                  { backgroundColor: colors.surface, borderColor: colors.border },
+                  customFocusedKey === 'hub-2' && { borderColor: '#FFD600', backgroundColor: '#FFD600' }
+                ]}
+              >
+                <Feather
+                  name="refresh-cw"
+                  size={48}
+                  color={customFocusedKey === 'hub-2' ? '#000' : colors.textSec}
+                />
+                <Text style={[styles.tvHubCardTitle, { color: colors.text }]}>Refresh Playlist</Text>
+                <Text style={[styles.tvHubCardDesc, { color: colors.textSec }]}>
+                  Reload latest channels from server
+                </Text>
+              </Pressable>
+            </View>
           </View>
+        ) : (
+          <View style={[styles.tvGridPageContainer, { backgroundColor: colors.phBg }]}>
+            <StatusBar barStyle={theme === 'light' ? 'dark-content' : 'light-content'} backgroundColor={colors.phBg} />
 
-          {/* Category Chips Container */}
-          <View style={styles.tvCategoriesContainer}>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tvCatScroll}>
-              {activeCategories.map((cat) => {
-                const isSelected = activeCategory === cat;
-                const chipId = `tv-cat-${tvSection}-${cat}`;
-                return (
-                  <TouchableOpacity
-                    key={cat}
-                    focusable={true}
-                    activeOpacity={0.8}
-                    onFocus={() => setFocusedId(chipId)}
-                    onBlur={() => { if (focusedId === chipId) setFocusedId(null); }}
-                    onPress={() => setActiveCategory(cat)}
-                    style={[
-                      styles.tvCatChip,
-                      { backgroundColor: colors.surface, borderColor: colors.border },
-                      isSelected && { backgroundColor: colors.primary, borderColor: 'transparent' },
-                      focusedId === chipId && styles.tvCatChipFocused
-                    ]}
-                  >
-                    <Text style={[
-                      styles.tvCatChipText,
-                      { color: colors.textSec },
-                      isSelected && { color: '#fff', fontWeight: 'bold' },
-                      focusedId === chipId && { color: '#000' }
-                    ]}>
-                      {cat}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          </View>
-
-          {/* Main Grid View */}
-          <FlatList
-            key={`${tvSection}-${activeCategory}`}
-            data={filteredItems}
-            keyExtractor={(item) => item.id}
-            numColumns={5}
-            contentContainerStyle={styles.tvGridContent}
-            columnWrapperStyle={styles.tvGridRow}
-            renderItem={({ item }) => {
-              const itemId = `tv-grid-item-${item.id}`;
-              const isFocused = focusedId === itemId;
-
-              if (tvSection === 'live') {
-                return (
-                  <TouchableOpacity
-                    focusable={true}
-                    activeOpacity={0.85}
-                    onFocus={() => setFocusedId(itemId)}
-                    onBlur={() => { if (focusedId === itemId) setFocusedId(null); }}
-                    onPress={() => {
-                      navigation.navigate('Player', {
-                        streamUrl: item.streamUrl,
-                        title: item.name,
-                        channels: channels,
-                        currentChannelId: item.id,
-                        isLive: true
-                      });
-                    }}
-                    style={[
-                      styles.tvChannelCard,
-                      { backgroundColor: colors.surface, borderColor: colors.border },
-                      isFocused && styles.tvCardFocused
-                    ]}
-                  >
-                    <View style={[styles.tvChannelLogoWrapper, { backgroundColor: item.logoBg || colors.border, borderBottomColor: colors.border }]}>
-                      {item.logoUrl ? (
-                        <Image source={{ uri: item.logoUrl }} style={styles.tvChannelLogo} />
-                      ) : (
-                        <Feather
-                          name={item.iconName === 'television' ? 'tv' : 'radio'}
-                          size={40}
-                          color={item.logoColor || colors.primary}
-                        />
-                      )}
-                    </View>
-                    <View style={styles.tvChannelInfo}>
-                      <Text style={[styles.tvChannelName, { color: colors.text }]} numberOfLines={1}>{item.name}</Text>
-                    </View>
-                  </TouchableOpacity>
-                );
-              } else {
-                return (
-                  <TouchableOpacity
-                    focusable={true}
-                    activeOpacity={0.85}
-                    onFocus={() => setFocusedId(itemId)}
-                    onBlur={() => { if (focusedId === itemId) setFocusedId(null); }}
-                    onPress={() => {
-                      navigation.navigate('Player', {
-                        streamUrl: item.streamUrl,
-                        title: item.title,
-                        channels: MOCK_MOVIES,
-                        currentChannelId: item.id,
-                        isLive: false
-                      });
-                    }}
-                    style={[
-                      styles.tvMovieCard,
-                      { backgroundColor: colors.surface, borderColor: colors.border },
-                      isFocused && styles.tvCardFocused
-                    ]}
-                  >
-                    <Image source={{ uri: item.image }} style={styles.tvMovieImage} />
-                    <View style={styles.tvMovieRatingBadge}>
-                      <MaterialCommunityIcons name="star" size={12} color="#000" />
-                      <Text style={styles.tvMovieRatingText}>{item.rating}</Text>
-                    </View>
-                    <LinearGradient
-                      colors={['transparent', 'rgba(0, 0, 0, 0.95)']}
-                      style={styles.tvMovieMetaWrapper}
-                    >
-                      <Text style={styles.tvMovieTitle} numberOfLines={1}>{item.title}</Text>
-                      <Text style={styles.tvMovieYearGenre}>{item.year} • {item.genre}</Text>
-                    </LinearGradient>
-                  </TouchableOpacity>
-                );
-              }
-            }}
-            ListEmptyComponent={
-              <View style={styles.tvEmptyContainer}>
-                <Feather name="slash" size={48} color={colors.textSec} />
-                <Text style={[styles.tvEmptyText, { color: colors.textSec }]}>No content available in this category</Text>
+            {/* Full-width Header with Back Button */}
+            <View style={styles.tvGridHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.tvGridHeaderTitle, { color: colors.text }]}>
+                  {tvSection === 'live' ? 'Live TV Channels' : 'Movies & Video Library'}
+                </Text>
+                <Text style={[styles.tvGridHeaderSubtitle, { color: colors.textSec }]}>
+                  {tvSection === 'live'
+                    ? `${filteredItems.length} live streams available`
+                    : `${filteredItems.length} premium movies to watch`
+                  }
+                </Text>
               </View>
-            }
-          />
+
+              {/* Back to Hub button */}
+              <Pressable
+                focusable={true}
+                hasTVPreferredFocus={isTV && !initialFocusDone && customFocusedKey === 'back-btn'}
+                onFocus={() => {
+                  setCustomFocusedKey('back-btn');
+                }}
+                onPress={() => {
+                  setTvActiveSubScreen('hub');
+                  setCustomFocusedKey(tvSection === 'live' ? 'hub-0' : 'hub-1');
+                }}
+                style={[
+                  styles.tvGridBackBtn,
+                  { backgroundColor: colors.surface, borderColor: 'transparent' },
+                  customFocusedKey === 'back-btn' && { borderColor: focusColor, backgroundColor: focusBgColor }
+                ]}
+              >
+                <Feather
+                  name="arrow-left"
+                  size={18}
+                  color={customFocusedKey === 'back-btn' ? focusColor : colors.text}
+                  style={{ marginRight: 6 }}
+                />
+                <Text style={[styles.tvGridBackBtnText, { color: colors.text }]}>Back to Hub</Text>
+              </Pressable>
+            </View>
+
+            {/* Main Grid View (Full Width) */}
+            <FlatList
+              ref={tvGridRef}
+              key={tvSection}
+              data={filteredItems}
+              keyExtractor={(item) => item.id}
+              numColumns={5}
+              style={{ flex: 1, overflow: 'hidden' }}
+              contentContainerStyle={styles.tvGridContent}
+              columnWrapperStyle={styles.tvGridRow}
+              removeClippedSubviews={false}
+              renderItem={({ item, index }) => {
+                const isFocused = customFocusedKey === `grid-${index}`;
+                if (tvSection === 'live') {
+                  return (
+                    <Pressable
+                      focusable={true}
+                      hasTVPreferredFocus={isTV && !initialFocusDone && customFocusedKey === `grid-${index}`}
+                      onFocus={() => {
+                        setCustomFocusedKey(`grid-${index}`);
+                      }}
+                      onPress={() => {
+                        navigation.navigate('Player', {
+                          streamUrl: item.streamUrl,
+                          title: item.name,
+                          channels: channelsRef.current,
+                          currentChannelId: item.id,
+                          isLive: true
+                        });
+                      }}
+                      style={[
+                        styles.tvChannelCard,
+                        { width: tvCardWidth, backgroundColor: 'transparent', borderColor: 'transparent' },
+                        isFocused && {
+                          borderColor: focusColor,
+                        }
+                      ]}
+                    >
+                      <View style={[styles.tvChannelLogoWrapper, { backgroundColor: 'transparent', borderBottomColor: colors.border }]}>
+                        {item.logoUrl ? (
+                          <Image source={{ uri: item.logoUrl }} style={styles.tvChannelLogo} />
+                        ) : (
+                          <Feather
+                            name={item.iconName === 'television' ? 'tv' : 'radio'}
+                            size={40}
+                            color={item.logoColor || '#00C853'}
+                          />
+                        )}
+                      </View>
+                      <View style={styles.tvChannelInfo}>
+                        <Text style={[styles.tvChannelName, { color: colors.text }]} numberOfLines={1}>{item.name}</Text>
+                      </View>
+                    </Pressable>
+                  );
+                } else {
+                  return (
+                    <Pressable
+                      focusable={true}
+                      hasTVPreferredFocus={isTV && !initialFocusDone && customFocusedKey === `grid-${index}`}
+                      onFocus={() => {
+                        setCustomFocusedKey(`grid-${index}`);
+                      }}
+                      onPress={() => {
+                        navigation.navigate('Player', {
+                          streamUrl: item.streamUrl,
+                          title: item.title,
+                          channels: MOCK_MOVIES,
+                          currentChannelId: item.id,
+                          isLive: false
+                        });
+                      }}
+                      style={[
+                        styles.tvMovieCard,
+                        { width: tvCardWidth, backgroundColor: 'transparent', borderColor: 'transparent' },
+                        isFocused && {
+                          borderColor: focusColor,
+                        }
+                      ]}
+                    >
+                      <Image source={{ uri: item.image }} style={styles.tvMovieImage} />
+                      <View style={styles.tvMovieRatingBadge}>
+                        <MaterialCommunityIcons name="star" size={12} color="#000" />
+                        <Text style={styles.tvMovieRatingText}>{item.rating}</Text>
+                      </View>
+                      <View style={styles.tvMovieMetaWrapper}>
+                        <Text style={[styles.tvMovieTitle, { color: colors.text }]} numberOfLines={1}>{item.title}</Text>
+                        <Text style={[styles.tvMovieYearGenre, { color: colors.textSec }]} numberOfLines={1}>{item.year} • {item.genre}</Text>
+                      </View>
+                    </Pressable>
+                  );
+                }
+              }}
+              ListEmptyComponent={
+                <View style={styles.tvEmptyContainer}>
+                  <Feather name="slash" size={48} color={colors.textSec} />
+                  <Text style={[styles.tvEmptyText, { color: colors.textSec }]}>No content available in this category</Text>
+                </View>
+              }
+            />
+          </View>
+        )}
+
+        {/* Floating Debug Panel
+        <View style={{
+          position: 'absolute',
+          top: 10,
+          right: 10,
+          backgroundColor: 'rgba(0,0,0,0.85)',
+          padding: 8,
+          borderRadius: 8,
+          zIndex: 9999,
+          borderWidth: 1,
+          borderColor: '#FF0000',
+        }}>
+          <Text style={{ color: '#00C853', fontSize: 10, fontWeight: 'bold' }}>[TV DEBUG PANEL]</Text>
+          <Text style={{ color: '#fff', fontSize: 10, marginTop: 4 }}>SubScreen: {tvActiveSubScreen}</Text>
+          <Text style={{ color: '#fff', fontSize: 10 }}>FocusedKey: {customFocusedKey}</Text>
+          <Text style={{ color: '#fff', fontSize: 10 }}>isTV: {isTV ? 'true' : 'false'}</Text>
+          <Text style={{ color: '#FFD600', fontSize: 10, marginTop: 4, fontWeight: 'bold' }}>Key Logs:</Text>
+          {debugLogs.length === 0 ? (
+            <Text style={{ color: '#aaa', fontSize: 9 }}>No keys received yet</Text>
+          ) : (
+            debugLogs.map((log, i) => (
+              <Text key={i} style={{ color: '#aaa', fontSize: 9 }}>{log}</Text>
+            ))
+          )}
         </View>
+        */}
       </View>
     );
   };
+
+  const isLandscapeMobile = !isTV && sWidth > sHeight;
+
+  if (isLandscapeMobile) {
+    return (
+      <View style={{ flex: 1, backgroundColor: colors.phBg, justifyContent: 'center', alignItems: 'center' }}>
+        <StatusBar barStyle="light-content" backgroundColor={colors.phBg} />
+        <Image
+          source={require('../../assets/logo_tv.png')}
+          style={{ width: 140, height: 45, resizeMode: 'contain', marginBottom: 20, opacity: 0.8 }}
+        />
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
 
   if (isTV) {
     return renderTvLayout();
@@ -500,7 +829,7 @@ export default function HomeScreen({ navigation }) {
       <StatusBar barStyle={theme === 'light' ? 'dark-content' : 'light-content'} backgroundColor={colors.phBg} />
       <TopBar navigation={navigation} />
 
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false} removeClippedSubviews={false}>
         {/* Hero Slider */}
         <View style={styles.heroContainer}>
           <FlatList
@@ -513,6 +842,7 @@ export default function HomeScreen({ navigation }) {
             scrollEventThrottle={16}
             renderItem={renderHeroItem}
             keyExtractor={(item) => item.id}
+            removeClippedSubviews={false}
           />
           {/* Slider Dots */}
           <View style={styles.dotsRow}>
@@ -563,7 +893,7 @@ export default function HomeScreen({ navigation }) {
         <View style={styles.sectionHeader}>
           <Text style={[styles.sectionTitle, { color: colors.text }]}>Live TV</Text>
           <TouchableOpacity onPress={() => navigation.navigate('Live')}>
-            <Text style={[styles.seeAll, { color: colors.primary }]}>View All</Text>
+            <Text style={[styles.seeAll, { color: '#00C853' }]}>View All</Text>
           </TouchableOpacity>
         </View>
         <FlatList
@@ -573,6 +903,7 @@ export default function HomeScreen({ navigation }) {
           renderItem={renderChannelItem}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.horizontalList}
+          removeClippedSubviews={false}
         />
 
         {/* New Movies Section */}
@@ -600,6 +931,7 @@ export default function HomeScreen({ navigation }) {
           contentContainerStyle={styles.horizontalList}
           onScroll={(e) => handleScroll(e, newMoviesOffset)}
           scrollEventThrottle={16}
+          removeClippedSubviews={false}
         />
 
         {/* Trending Now Section */}
@@ -627,6 +959,7 @@ export default function HomeScreen({ navigation }) {
           contentContainerStyle={styles.horizontalList}
           onScroll={(e) => handleScroll(e, trendingOffset)}
           scrollEventThrottle={16}
+          removeClippedSubviews={false}
         />
 
         {/* Popular Actors Section */}
@@ -643,6 +976,7 @@ export default function HomeScreen({ navigation }) {
           renderItem={renderActorItem}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.horizontalList}
+          removeClippedSubviews={false}
         />
       </ScrollView>
     </SafeAreaView>
@@ -1040,7 +1374,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 8,
     gap: 10,
-    borderWidth: 2,
+    borderWidth: 3,
     borderColor: 'transparent',
     ...Platform.select({
       web: {
@@ -1070,6 +1404,7 @@ const styles = StyleSheet.create({
     width: '80%',
     padding: 25,
     flex: 1,
+    flexDirection: 'column',
   },
   tvHeader: {
     flexDirection: 'row',
@@ -1099,7 +1434,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 6,
     borderRadius: 16,
-    borderWidth: 2,
+    borderWidth: 3,
     borderColor: 'transparent',
     justifyContent: 'center',
     alignItems: 'center',
@@ -1120,20 +1455,21 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   tvGridContent: {
-    paddingBottom: 20,
-    gap: 15,
+    paddingHorizontal: 10,
+    paddingTop: 10,
+    paddingBottom: 30,
+    gap: 12,
   },
   tvGridRow: {
     justifyContent: 'flex-start',
-    gap: 15,
+    gap: 12,
+    overflow: 'visible',
   },
   tvChannelCard: {
-    width: '18.4%',
     aspectRatio: 1.3,
-    borderRadius: 40,
+    borderRadius: 18,
     overflow: 'hidden',
-    borderWidth: 2,
-    elevation: 3,
+    borderWidth: 3,
     ...Platform.select({
       web: {
         outlineStyle: 'none',
@@ -1161,7 +1497,7 @@ const styles = StyleSheet.create({
   },
   tvChannelName: {
     fontFamily: 'System',
-    fontSize: 16,
+    fontSize: 13,
     fontWeight: '700',
     textAlign: 'center',
   },
@@ -1171,13 +1507,11 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   tvMovieCard: {
-    width: '18.4%',
     aspectRatio: 0.7,
-    borderRadius: 12,
+    borderRadius: 18,
     overflow: 'hidden',
     position: 'relative',
-    borderWidth: 2,
-    elevation: 3,
+    borderWidth: 3,
     ...Platform.select({
       web: {
         outlineStyle: 'none',
@@ -1244,6 +1578,87 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   tvEmptyText: {
+    fontFamily: 'System',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  tvHubContainer: {
+    flex: 1,
+    padding: 30,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  tvHubHeader: {
+    alignItems: 'center',
+    marginBottom: 40,
+  },
+  tvHubSubtitle: {
+    fontFamily: 'System',
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 10,
+    letterSpacing: 1.5,
+  },
+  tvHubCardsRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 24,
+  },
+  tvHubCard: {
+    width: 230,
+    height: 250,
+    borderRadius: 20,
+    borderWidth: 3,
+    padding: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 3,
+  },
+  tvHubCardTitle: {
+    fontFamily: 'System',
+    fontSize: 18,
+    fontWeight: '700',
+    marginTop: 18,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  tvHubCardDesc: {
+    fontFamily: 'System',
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 16,
+  },
+  tvGridPageContainer: {
+    flex: 1,
+    padding: 30,
+    flexDirection: 'column',
+  },
+  tvGridHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  tvGridHeaderTitle: {
+    fontFamily: 'System',
+    fontSize: 26,
+    fontWeight: '700',
+  },
+  tvGridHeaderSubtitle: {
+    fontFamily: 'System',
+    fontSize: 14,
+    marginTop: 4,
+  },
+  tvGridBackBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    borderWidth: 3,
+  },
+  tvGridBackBtnText: {
     fontFamily: 'System',
     fontSize: 14,
     fontWeight: '600',

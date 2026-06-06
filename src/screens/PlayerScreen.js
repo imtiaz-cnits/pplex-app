@@ -4,6 +4,7 @@ import {
   View,
   Text,
   TouchableOpacity,
+  Pressable,
   ActivityIndicator,
   StatusBar,
   useWindowDimensions,
@@ -14,6 +15,7 @@ import {
   Platform,
   DeviceEventEmitter,
   NativeModules,
+  BackHandler,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Video, ResizeMode } from 'expo-av';
@@ -47,6 +49,79 @@ const CATEGORY_IMAGES = {
   'Other': 'https://images.unsplash.com/photo-1594909122845-11baa439b7bf?q=80&w=400',
 };
 
+// Custom component for drawer items to manage focus state locally and prevent sticky focus
+const DrawerChannelItem = React.memo(({
+  item,
+  index,
+  isActive,
+  isLive,
+  isTV,
+  rightDrawerOpen,
+  focusedDrawerIndex,
+  initialFocusDone,
+  onPress,
+  onFocus,
+  getTvProps
+}) => {
+  const [isFocused, setIsFocused] = useState(false);
+  const focusColor = isLive ? '#00C853' : '#FF0000';
+  const focusBgColor = isLive ? 'rgba(0, 200, 83, 0.35)' : 'rgba(255, 0, 0, 0.35)';
+
+  const tvProps = getTvProps('drawer-ch-' + item.id);
+
+  return (
+    <Pressable
+      focusable={tvProps.focusable}
+      hasTVPreferredFocus={isTV && rightDrawerOpen && !initialFocusDone && index === focusedDrawerIndex}
+      onPress={onPress}
+      onFocus={() => {
+        setIsFocused(true);
+        tvProps.onFocus();
+        onFocus(index);
+      }}
+      onBlur={() => {
+        setIsFocused(false);
+        tvProps.onBlur();
+      }}
+      style={[
+        styles.drawerItem,
+        isActive && styles.drawerItemActive,
+        isActive && { backgroundColor: isLive ? 'rgba(0, 200, 83, 0.08)' : 'rgba(255, 0, 0, 0.08)' },
+        isFocused && {
+          borderColor: focusColor,
+          backgroundColor: focusBgColor,
+          borderWidth: 3,
+          borderRadius: 8,
+          transform: [{ scale: 1.05 }],
+        }
+      ]}
+    >
+      {item.logoUrl ? (
+        <Image source={{ uri: item.logoUrl }} style={styles.drawerItemLogo} />
+      ) : (
+        <View style={[styles.drawerItemLogoPlaceholder, { backgroundColor: item.logoBg || '#222' }]}>
+          <Feather
+            name={item.iconName === 'television' ? 'tv' : 'radio'}
+            size={24}
+            color={item.logoColor || '#fff'}
+          />
+        </View>
+      )}
+      <Text
+        style={[
+          styles.drawerItemText,
+          isActive && styles.drawerItemTextActive,
+          isActive && { color: isLive ? '#00C853' : '#FF0000' }
+        ]}
+        numberOfLines={1}
+      >
+        {item.name}
+      </Text>
+      {isActive && <View style={[styles.activeDot, { backgroundColor: isLive ? '#00C853' : '#FF0000' }]} />}
+    </Pressable>
+  );
+});
+
 export default function PlayerScreen({ route, navigation }) {
   useKeepAwake();
   const { colors, theme } = useTheme();
@@ -54,6 +129,8 @@ export default function PlayerScreen({ route, navigation }) {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const isPortrait = width < height;
+  const isTV = Platform.isTV || width > 900 || (width > height && Platform.OS === 'android');
+  const isTVDevice = Platform.isTV || width > 900;
   const videoRef = useRef(null);
 
   // PiP State
@@ -111,12 +188,113 @@ export default function PlayerScreen({ route, navigation }) {
   const hudTimerRef = useRef(null);
   const doubleTapTimerRef = useRef(null);
   const lastTapRef = useRef(null);
+  const channelsListRef = useRef(null);
+  const categoriesListRef = useRef(null);
 
   // Update refs
   useEffect(() => { brightnessRef.current = brightness; }, [brightness]);
   useEffect(() => { volumeRef.current = volume; }, [volume]);
   useEffect(() => { widthRef.current = width; }, [width]);
   useEffect(() => { heightRef.current = height; }, [height]);
+
+  const isLive = isLiveParam !== undefined ? isLiveParam : ((channels && channels.length > 0) || !status.durationMillis || status.durationMillis === 0);
+  const originalBrightnessRef = useRef(1.0);
+
+  // TV D-Pad Focus State
+  const [focusedBtnId, setFocusedBtnId] = useState(null);
+  const focusedBtnIdRef = useRef(null);
+  const [focusedDrawerIndex, setFocusedDrawerIndex] = useState(0);
+  const [initialFocusDone, setInitialFocusDone] = useState(false);
+
+  useEffect(() => {
+    if (rightDrawerOpen) {
+      setInitialFocusDone(false);
+      const timer = setTimeout(() => {
+        setInitialFocusDone(true);
+      }, 500);
+      return () => clearTimeout(timer);
+    } else {
+      setInitialFocusDone(false);
+    }
+  }, [rightDrawerOpen]);
+
+  useEffect(() => {
+    focusedBtnIdRef.current = focusedBtnId;
+    if (focusedBtnId) {
+      setControlsVisible(true);
+    }
+  }, [focusedBtnId]);
+
+  // Initialize drawer focus index when open
+  useEffect(() => {
+    if (rightDrawerOpen && filteredChannels.length > 0) {
+      const activeIdx = filteredChannels.findIndex(c => String(c.id) === String(activeChannelId));
+      if (activeIdx !== -1) {
+        setFocusedDrawerIndex(activeIdx);
+      } else {
+        setFocusedDrawerIndex(0);
+      }
+    }
+  }, [rightDrawerOpen, activeChannelId, filteredChannels]);
+
+  // Scroll to focused item in drawer
+  useEffect(() => {
+    if (rightDrawerOpen && filteredChannels.length > 0) {
+      try {
+        if (focusedDrawerIndex >= 0 && focusedDrawerIndex < filteredChannels.length) {
+          channelsListRef.current?.scrollToIndex({
+            index: focusedDrawerIndex,
+            animated: false,
+            viewPosition: 0.5,
+          });
+        }
+      } catch (err) {
+        // Fallback if layout not ready
+      }
+    }
+  }, [focusedDrawerIndex, rightDrawerOpen, filteredChannels]);
+
+  // Helper to inject D-Pad focus properties
+  const getTvProps = (btnId, baseStyle = {}) => {
+    const isFocused = focusedBtnId === btnId;
+    const isDrawerItem = btnId.startsWith('drawer-');
+    
+    // Trap focus inside the drawer when open, and inside control overlay when closed.
+    const isFocusable = isDrawerItem ? rightDrawerOpen : !rightDrawerOpen;
+    
+    const focusColor = isLive ? '#00C853' : '#FF0000';
+    const focusBgColor = isLive ? 'rgba(0, 200, 83, 0.35)' : 'rgba(255, 0, 0, 0.35)';
+    return {
+      focusable: isFocusable,
+      onFocus: () => {
+        setFocusedBtnId(btnId);
+        showControlsWithTimeout();
+      },
+      onBlur: () => {
+        setFocusedBtnId((prev) => (prev === btnId ? null : prev));
+        showControlsWithTimeout();
+      },
+      style: [
+        baseStyle,
+        isFocused && (isDrawerItem ? {
+          backgroundColor: focusBgColor,
+          borderColor: focusColor,
+          borderWidth: 3,
+          borderRadius: btnId.startsWith('drawer-cat-') ? 20 : 8,
+          transform: [{ scale: 1.05 }],
+        } : {
+          borderColor: focusColor,
+          backgroundColor: focusBgColor,
+          transform: [{ scale: 1.08 }],
+          shadowColor: focusColor,
+          shadowOffset: { width: 0, height: 0 },
+          shadowOpacity: 0.8,
+          shadowRadius: 8,
+          elevation: 8,
+        })
+      ]
+    };
+  };
 
   const RESIZE_MODES = [ResizeMode.CONTAIN, ResizeMode.COVER, ResizeMode.STRETCH];
   const RESIZE_LABELS = ['Fit', 'Fill', 'Stretch'];
@@ -193,11 +371,20 @@ export default function PlayerScreen({ route, navigation }) {
 
     // 4. Sync Initial Brightness and Volume settings
     const syncInitialSettings = async () => {
-      try {
-        const systemBrightness = await Brightness.getBrightnessAsync();
-        setBrightness(systemBrightness);
-      } catch (err) {
-        console.log('Error getting initial brightness:', err);
+      if (!isTV) {
+        try {
+          let systemBrightness = await Brightness.getBrightnessAsync();
+          if (systemBrightness === null || systemBrightness === undefined || systemBrightness < 0) {
+            systemBrightness = 1.0; // Default to 1.0 (fully bright) if -1 or invalid
+          }
+          originalBrightnessRef.current = systemBrightness;
+          setBrightness(systemBrightness);
+        } catch (err) {
+          console.log('Error getting initial brightness:', err);
+          setBrightness(1.0);
+        }
+      } else {
+        setBrightness(1.0);
       }
 
       if (VolumeManager) {
@@ -236,6 +423,19 @@ export default function PlayerScreen({ route, navigation }) {
       }
       if (pipSubscription) {
         pipSubscription.remove();
+      }
+
+      // Restore original system brightness
+      if (!isTV) {
+        if (Platform.OS === 'android') {
+          Brightness.restoreSystemBrightnessAsync().catch(err => {
+            console.log('Error restoring brightness (Android):', err);
+          });
+        } else {
+          Brightness.setBrightnessAsync(originalBrightnessRef.current).catch(err => {
+            console.log('Error restoring brightness (iOS):', err);
+          });
+        }
       }
 
       // Restore orientation to Portrait when leaving
@@ -294,10 +494,16 @@ export default function PlayerScreen({ route, navigation }) {
     if (controlsTimerRef.current) {
       clearTimeout(controlsTimerRef.current);
     }
+    const timeoutDuration = isTV ? 5000 : 3000;
     controlsTimerRef.current = setTimeout(() => {
+      if (isTV && focusedBtnIdRef.current) {
+        // Keep controls visible if a button is focused on TV
+        showControlsWithTimeout();
+        return;
+      }
       setControlsVisible(false);
       setShowSpeedMenu(false);
-    }, 1500);
+    }, timeoutDuration);
   };
 
   const toggleControls = () => {
@@ -305,6 +511,11 @@ export default function PlayerScreen({ route, navigation }) {
       setLockBtnVisible(true);
       if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
       controlsTimerRef.current = setTimeout(() => setLockBtnVisible(false), 2000);
+      return;
+    }
+    if (isLive) {
+      setRightDrawerOpen(!rightDrawerOpen);
+      showControlsWithTimeout();
       return;
     }
     if (controlsVisible) {
@@ -407,7 +618,7 @@ export default function PlayerScreen({ route, navigation }) {
 
   const handlePreviousChannel = () => {
     if (!channels || channels.length === 0) return;
-    const currentIndex = channels.findIndex((c) => c.id === activeChannelId);
+    const currentIndex = channels.findIndex((c) => String(c.id) === String(activeChannelId));
     if (currentIndex === -1) return;
     const prevIndex = (currentIndex - 1 + channels.length) % channels.length;
     const prevChannel = channels[prevIndex];
@@ -416,7 +627,7 @@ export default function PlayerScreen({ route, navigation }) {
 
   const handleNextChannel = () => {
     if (!channels || channels.length === 0) return;
-    const currentIndex = channels.findIndex((c) => c.id === activeChannelId);
+    const currentIndex = channels.findIndex((c) => String(c.id) === String(activeChannelId));
     if (currentIndex === -1) return;
     const nextIndex = (currentIndex + 1) % channels.length;
     const nextChannel = channels[nextIndex];
@@ -432,7 +643,150 @@ export default function PlayerScreen({ route, navigation }) {
     showControlsWithTimeout();
   };
 
-  const handlePopout = async () => {
+  const handlePrevCategory = () => {
+    const currentIdx = categories.indexOf(selectedCategory);
+    let nextIdx = currentIdx - 1;
+    if (nextIdx < 0) nextIdx = categories.length - 1;
+    setSelectedCategory(categories[nextIdx]);
+    showControlsWithTimeout();
+  };
+
+  const handleNextCategory = () => {
+    const currentIdx = categories.indexOf(selectedCategory);
+    let nextIdx = (currentIdx + 1) % categories.length;
+    setSelectedCategory(categories[nextIdx]);
+    showControlsWithTimeout();
+  };
+
+  const getItemLayout = (data, index) => ({
+    length: 72,
+    offset: 72 * index,
+    index,
+  });
+
+  const getCatItemLayout = (data, index) => ({
+    length: 90,
+    offset: 90 * index,
+    index,
+  });
+
+  // Active channel scrolling persistence when drawer opens
+  useEffect(() => {
+    if (rightDrawerOpen && filteredChannels.length > 0) {
+      const activeIdx = filteredChannels.findIndex(c => String(c.id) === String(activeChannelId));
+      if (activeIdx !== -1) {
+        const timer = setTimeout(() => {
+          try {
+            if (activeIdx >= 0 && activeIdx < filteredChannelsRef.current.length) {
+              channelsListRef.current?.scrollToIndex({
+                index: activeIdx,
+                animated: false,
+                viewPosition: 0.5,
+              });
+            }
+          } catch (err) {
+            console.log('[DEBUG] setTimeout scrollToIndex error:', err);
+          }
+        }, 120);
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [rightDrawerOpen]);
+
+  const focusedDrawerIndexRef = useRef(focusedDrawerIndex);
+  const filteredChannelsRef = useRef(filteredChannels);
+  useEffect(() => { focusedDrawerIndexRef.current = focusedDrawerIndex; }, [focusedDrawerIndex]);
+  useEffect(() => { filteredChannelsRef.current = filteredChannels; }, [filteredChannels]);
+
+  // TV Remote D-Pad Event Handler (using native device event emitter)
+  useEffect(() => {
+    const subscription = DeviceEventEmitter.addListener('onHWKeyEvent', (evt) => {
+      if (!evt) return;
+      const { eventType, eventKeyAction } = evt;
+      if (eventKeyAction !== undefined && eventKeyAction !== 0) return;
+      
+      const currentFocusedDrawerIndex = focusedDrawerIndexRef.current;
+      const currentFilteredChannels = filteredChannelsRef.current;
+
+      if (rightDrawerOpen) {
+        if (eventType === 'up') {
+          const nextIdx = Math.max(0, currentFocusedDrawerIndex - 1);
+          setFocusedDrawerIndex(nextIdx);
+          showControlsWithTimeout();
+        } else if (eventType === 'down') {
+          const nextIdx = Math.min(currentFilteredChannels.length - 1, currentFocusedDrawerIndex + 1);
+          setFocusedDrawerIndex(nextIdx);
+          showControlsWithTimeout();
+        } else if (eventType === 'left') {
+          handlePrevCategory();
+        } else if (eventType === 'right') {
+          handleNextCategory();
+        } else if (eventType === 'select' || eventType === 'center' || eventType === 'playPause') {
+          const targetChannel = currentFilteredChannels[currentFocusedDrawerIndex];
+          if (targetChannel) {
+            switchToChannel(targetChannel);
+            setRightDrawerOpen(false);
+          }
+        }
+      } else {
+        if (isLive) {
+          if (eventType === 'up') {
+            handlePreviousChannel();
+          } else if (eventType === 'down') {
+            handleNextChannel();
+          } else if (eventType === 'select' || eventType === 'center' || eventType === 'playPause') {
+            setRightDrawerOpen(true);
+            showControlsWithTimeout();
+          }
+        } else {
+          // VOD Stream D-pad support
+          if (eventType === 'select' || eventType === 'center' || eventType === 'playPause') {
+            handlePlayPause();
+            showControlsWithTimeout();
+          } else if (eventType === 'left') {
+            seekRelative(-10000);
+            showControlsWithTimeout();
+          } else if (eventType === 'right') {
+            seekRelative(10000);
+            showControlsWithTimeout();
+          } else if (eventType === 'up' || eventType === 'down') {
+            showControlsWithTimeout();
+          }
+        }
+      }
+    });
+    return () => {
+      subscription.remove();
+    };
+  }, [rightDrawerOpen, isLive, activeChannelId, channels, categories, selectedCategory, controlsVisible]);
+
+  // Handle hardware back press (close drawer if open, otherwise trigger PiP)
+  useEffect(() => {
+    const backAction = () => {
+      if (rightDrawerOpen) {
+        setRightDrawerOpen(false);
+        return true;
+      }
+      handlePopout();
+      return true;
+    };
+
+    const backHandler = BackHandler.addEventListener(
+      'hardwareBackPress',
+      backAction
+    );
+
+    return () => backHandler.remove();
+  }, [rightDrawerOpen, currentUrl, currentTitle, channels, activeChannelId, isLive]);
+
+  async function handlePopout() {
+    if (isTVDevice) {
+      if (navigation.canGoBack()) {
+        navigation.goBack();
+      }
+      return;
+    }
+
     if (isPipAvailable) {
       try {
         const supported = await PipModule.isPipSupported();
@@ -453,8 +807,19 @@ export default function PlayerScreen({ route, navigation }) {
       isLive: isLive
     });
     setPipActive(true);
-    navigation.goBack();
-  };
+
+    try {
+      await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+    } catch (err) {
+      console.log('Orientation lock error in handlePopout:', err);
+    }
+
+    setTimeout(() => {
+      if (navigation.canGoBack()) {
+        navigation.goBack();
+      }
+    }, 150);
+  }
 
   const seekTo = async (millis) => {
     if (!videoRef.current) return;
@@ -537,8 +902,8 @@ export default function PlayerScreen({ route, navigation }) {
         return Math.abs(gestureState.dy) > 10;
       },
       onPanResponderGrant: (evt, gestureState) => {
-        startVolume.current = volumeRef.current;
-        startBrightness.current = brightnessRef.current;
+        startVolume.current = volume;
+        startBrightness.current = brightness;
       },
       onPanResponderMove: (evt, gestureState) => {
         const { x0, dy } = gestureState;
@@ -549,10 +914,10 @@ export default function PlayerScreen({ route, navigation }) {
           // Adjust screen brightness (left 50%)
           const val = Math.max(0.1, Math.min(1.0, startBrightness.current + delta));
           setBrightness(val);
-          try {
-            Brightness.setBrightnessAsync(val);
-          } catch (err) {
-            console.log('Error setting brightness:', err);
+          if (!isTV) {
+            Brightness.setBrightnessAsync(val).catch((err) => {
+              console.log('Error setting screen brightness:', err);
+            });
           }
           setHudType('brightness');
           setHudVisible(true);
@@ -598,7 +963,6 @@ export default function PlayerScreen({ route, navigation }) {
     return `${pad(minutes)}:${pad(seconds)}`;
   };
 
-  const isLive = isLiveParam !== undefined ? isLiveParam : ((channels && channels.length > 0) || !status.durationMillis || status.durationMillis === 0);
   const progress = (isLive || !status.durationMillis || status.durationMillis === 0) ? 0 : (status.positionMillis / status.durationMillis) * 100;
 
   const handleSeekBarTouch = (event) => {
@@ -625,6 +989,7 @@ export default function PlayerScreen({ route, navigation }) {
           resizeMode={RESIZE_MODES[resizeModeIndex]}
           shouldPlay={isPlaying}
           useNativeControls={false}
+          staysActiveInBackground={true}
           onLoadStart={() => setIsLoading(true)}
           onLoad={() => {
             setIsLoading(false);
@@ -651,17 +1016,41 @@ export default function PlayerScreen({ route, navigation }) {
 
         {!isInPip && (
           <>
+            {/* TV Box D-Pad Listener Background Focus Capture */}
+            {isTV && !rightDrawerOpen && (isLive || !controlsVisible) && (
+              <Pressable
+                focusable={true}
+                hasTVPreferredFocus={true}
+                style={{
+                  position: 'absolute',
+                  width: 10,
+                  height: 10,
+                  backgroundColor: 'transparent',
+                  left: 0,
+                  top: 0,
+                }}
+                onFocus={() => {
+                  setFocusedBtnId('background-focus');
+                }}
+                onBlur={() => {
+                  setFocusedBtnId((prev) => prev === 'background-focus' ? null : prev);
+                }}
+              />
+            )}
+
             {/* Local Brightness Simulated Shade Layer */}
-            <View
-              style={[
-                StyleSheet.absoluteFill,
-                {
-                  backgroundColor: '#000',
-                  opacity: 1 - brightness,
-                },
-              ]}
-              pointerEvents="none"
-            />
+            {!isTV && (
+              <View
+                style={[
+                  StyleSheet.absoluteFill,
+                  {
+                    backgroundColor: '#000',
+                    opacity: 1 - brightness,
+                  },
+                ]}
+                pointerEvents="none"
+              />
+            )}
 
             {/* Transparent tap layer behind buttons to capture screen play toggling/double-taps */}
             <TouchableOpacity
@@ -760,37 +1149,36 @@ export default function PlayerScreen({ route, navigation }) {
 
         {/* Control Interface Overlay */}
         {controlsVisible && !isLocked && (
-          <View style={styles.overlayWrapper} pointerEvents="box-none">
+          <View style={[styles.overlayWrapper, isLive && { backgroundColor: 'transparent' }]} pointerEvents="box-none">
             {/* Header section (HTML style matched) */}
-            <View style={[
-              styles.header,
-              {
-                paddingTop: Math.max(12, insets.top),
-                paddingLeft: Math.max(20, insets.left),
-                paddingRight: Math.max(20, insets.right)
-              }
-            ]}>
+            {!isLive && (
+              <View style={[
+                styles.header,
+                {
+                  paddingTop: Math.max(12, insets.top),
+                  paddingLeft: Math.max(20, insets.left),
+                  paddingRight: Math.max(20, insets.right)
+                }
+              ]}>
               <View style={styles.headerLeft}>
                 {channels && channels.length > 0 && (
-                  <TouchableOpacity
+                  <Pressable
                     onPress={() => {
                       setRightDrawerOpen(true);
                       showControlsWithTimeout();
                     }}
-                    style={[styles.iconBtn, isPortrait && styles.iconBtnPortrait]}
-                    activeOpacity={0.7}
+                    {...getTvProps('btn-menu', [styles.iconBtn, isPortrait && styles.iconBtnPortrait])}
                   >
                     <Feather name="menu" size={isPortrait ? 20 : 24} color="#fff" />
-                  </TouchableOpacity>
+                  </Pressable>
                 )}
 
-                <TouchableOpacity
-                  onPress={() => navigation.goBack()}
-                  style={[styles.iconBtn, isPortrait && styles.iconBtnPortrait, { marginLeft: isPortrait ? 6 : 10 }]}
-                  activeOpacity={0.7}
+                <Pressable
+                  onPress={handlePopout}
+                  {...getTvProps('btn-back', [styles.iconBtn, isPortrait && styles.iconBtnPortrait, { marginLeft: isPortrait ? 6 : 10 }])}
                 >
                   <Feather name="arrow-left" size={isPortrait ? 20 : 24} color="#fff" />
-                </TouchableOpacity>
+                </Pressable>
 
                 <Text style={styles.headerTitle} numberOfLines={1}>
                   {currentTitle}
@@ -799,19 +1187,22 @@ export default function PlayerScreen({ route, navigation }) {
 
               <View style={styles.headerRight}>
                 {/* Cast Icon (Mocked) */}
-                <Feather name="cast" size={isPortrait ? 18 : 22} color="#fff" style={{ marginRight: 15 }} />
+                {!isLive && (
+                  <Feather name="cast" size={isPortrait ? 18 : 22} color="#fff" style={{ marginRight: 15 }} />
+                )}
 
                 {/* Settings Toggle */}
-                <TouchableOpacity
-                  style={[styles.iconBtn, isPortrait && styles.iconBtnPortrait]}
-                  onPress={() => {
-                    setShowSpeedMenu(!showSpeedMenu);
-                    showControlsWithTimeout();
-                  }}
-                  activeOpacity={0.7}
-                >
-                  <Feather name="settings" size={isPortrait ? 18 : 22} color="#fff" />
-                </TouchableOpacity>
+                {!isLive && (
+                  <Pressable
+                    onPress={() => {
+                      setShowSpeedMenu(!showSpeedMenu);
+                      showControlsWithTimeout();
+                    }}
+                    {...getTvProps('btn-settings', [styles.iconBtn, isPortrait && styles.iconBtnPortrait])}
+                  >
+                    <Feather name="settings" size={isPortrait ? 18 : 22} color="#fff" />
+                  </Pressable>
+                )}
 
                 {/* Device Info Indicator with Accurate Battery Status */}
                 <Text style={styles.deviceInfoText}>
@@ -820,22 +1211,22 @@ export default function PlayerScreen({ route, navigation }) {
 
                 {/* Right Switcher Categories Drawer Trigger */}
                 {channels && channels.length > 0 && (
-                  <TouchableOpacity
+                  <Pressable
                     onPress={() => {
                       setRightDrawerOpen(true);
                       showControlsWithTimeout();
                     }}
-                    style={[styles.iconBtn, isPortrait && styles.iconBtnPortrait, { marginLeft: isPortrait ? 8 : 12 }]}
-                    activeOpacity={0.7}
+                    {...getTvProps('btn-list', [styles.iconBtn, isPortrait && styles.iconBtnPortrait, { marginLeft: isPortrait ? 8 : 12 }])}
                   >
                     <Feather name="list" size={isPortrait ? 18 : 22} color="#fff" />
-                  </TouchableOpacity>
+                  </Pressable>
                 )}
               </View>
             </View>
+            )}
 
             {/* Playback Settings Dropdown */}
-            {showSpeedMenu && (
+            {showSpeedMenu && !isLive && (
               <View style={[
                 styles.speedMenu,
                 {
@@ -848,8 +1239,8 @@ export default function PlayerScreen({ route, navigation }) {
                   {SPEEDS.map((sp) => (
                     <TouchableOpacity
                       key={sp}
-                      style={[styles.settingsOption, speed === sp && styles.settingsOptionActive]}
                       onPress={() => changeSpeed(sp)}
+                      {...getTvProps('speed-' + sp, [styles.settingsOption, speed === sp && styles.settingsOptionActive])}
                     >
                       <Text style={[styles.settingsText, speed === sp && styles.settingsTextActive]}>
                         {sp === 1.0 ? 'Normal' : `${sp}x`}
@@ -863,25 +1254,26 @@ export default function PlayerScreen({ route, navigation }) {
             )}
 
             {/* Middle Play/Pause Assist Button centered strictly */}
-            {!isPlaying && (
+            {!isPlaying && !isLive && (
               <TouchableOpacity
-                style={[styles.midPlayBtn, isPortrait && styles.midPlayBtnPortrait]}
                 onPress={handlePlayPause}
                 activeOpacity={0.8}
+                {...getTvProps('btn-mid-play', [styles.midPlayBtn, isPortrait && styles.midPlayBtnPortrait])}
               >
                 <Feather name="play" size={isPortrait ? 32 : 44} color="#FF0000" style={{ marginLeft: isPortrait ? 4 : 6 }} />
               </TouchableOpacity>
             )}
 
             {/* Bottom Controls Area (HTML structure matched) */}
-            <View style={[
-              styles.bottomControls,
-              {
-                paddingBottom: Math.max(15, insets.bottom),
-                paddingLeft: Math.max(20, insets.left),
-                paddingRight: Math.max(20, insets.right)
-              }
-            ]}>
+            {!isLive && (
+              <View style={[
+                styles.bottomControls,
+                {
+                  paddingBottom: Math.max(15, insets.bottom),
+                  paddingLeft: Math.max(20, insets.left),
+                  paddingRight: Math.max(20, insets.right)
+                }
+              ]}>
               {/* VOD Progress Bar and Time labels */}
               {!isLive && (
                 <View style={styles.progressBlock}>
@@ -923,13 +1315,13 @@ export default function PlayerScreen({ route, navigation }) {
                   {/* Row 1: Lock Button & Right Actions */}
                   <View style={styles.portraitTopRow}>
                     <TouchableOpacity
-                      style={[styles.lockBtn, styles.lockBtnPortrait]}
                       onPress={() => {
                         setIsLocked(true);
                         setControlsVisible(false);
                         setLockBtnVisible(true);
                       }}
                       activeOpacity={0.7}
+                      {...getTvProps('btn-lock', [styles.lockBtn, styles.lockBtnPortrait])}
                     >
                       <Feather name="lock" size={20} color="#fff" />
                     </TouchableOpacity>
@@ -937,8 +1329,8 @@ export default function PlayerScreen({ route, navigation }) {
                     <View style={[styles.rightActionsRow, styles.rightActionsRowPortrait]}>
                       <TouchableOpacity
                         onPress={toggleMute}
-                        style={[styles.actionIconBtn, styles.actionIconBtnPortrait]}
                         activeOpacity={0.7}
+                        {...getTvProps('btn-mute', [styles.actionIconBtn, styles.actionIconBtnPortrait])}
                       >
                         <Feather
                           name={isMuted || volume === 0 ? 'volume-x' : 'volume-2'}
@@ -947,186 +1339,180 @@ export default function PlayerScreen({ route, navigation }) {
                         />
                       </TouchableOpacity>
 
-                      <TouchableOpacity
-                        onPress={handlePopout}
-                        style={[styles.actionIconBtn, styles.actionIconBtnPortrait, { marginLeft: 8 }]}
-                        activeOpacity={0.7}
-                      >
-                        <MaterialIcons name="picture-in-picture-alt" size={20} color="#fff" />
-                      </TouchableOpacity>
+                      {!isTVDevice && (
+                        <TouchableOpacity
+                          onPress={handlePopout}
+                          activeOpacity={0.7}
+                          {...getTvProps('btn-pip', [styles.actionIconBtn, styles.actionIconBtnPortrait, { marginLeft: 8 }])}
+                        >
+                          <MaterialIcons name="picture-in-picture-alt" size={20} color="#fff" />
+                        </TouchableOpacity>
+                      )}
 
                       <TouchableOpacity
                         onPress={cycleResizeMode}
-                        style={[styles.actionIconBtn, styles.actionIconBtnPortrait, { marginLeft: 8 }]}
                         activeOpacity={0.7}
+                        {...getTvProps('btn-aspect', [styles.actionIconBtn, styles.actionIconBtnPortrait, { marginLeft: 8 }])}
                       >
                         <MaterialIcons name="aspect-ratio" size={20} color="#fff" />
-                      </TouchableOpacity>
-
-                      <TouchableOpacity
-                        onPress={toggleFullscreen}
-                        style={[styles.actionIconBtn, styles.actionIconBtnPortrait, { marginLeft: 8 }]}
-                        activeOpacity={0.7}
-                      >
-                        <Feather
-                          name={width > height ? 'minimize' : 'maximize'}
-                          size={20}
-                          color="#fff"
-                        />
                       </TouchableOpacity>
                     </View>
                   </View>
 
                   {/* Row 2: Playback Controls (Skip/Play/Seek) */}
-                  <View style={styles.portraitBottomRow}>
-                    <TouchableOpacity
-                      onPress={() => {
-                        if (channels && channels.length > 0) {
-                          handlePreviousChannel();
-                        } else {
-                          seekTo(0);
-                        }
-                      }}
-                      disabled={isLive && (!channels || channels.length === 0)}
-                      style={[styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && (!channels || channels.length === 0) && { opacity: 0.25 }]}
-                    >
-                      <Feather name="skip-back" size={20} color="#fff" />
-                    </TouchableOpacity>
+                  {!isLive && (
+                    <View style={styles.portraitBottomRow}>
+                      <TouchableOpacity
+                        onPress={() => {
+                          if (channels && channels.length > 0) {
+                            handlePreviousChannel();
+                          } else {
+                            seekTo(0);
+                          }
+                        }}
+                        disabled={isLive && (!channels || channels.length === 0)}
+                        {...getTvProps('btn-prev', [styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && (!channels || channels.length === 0) && { opacity: 0.25 }])}
+                      >
+                        <Feather name="skip-back" size={20} color="#fff" />
+                      </TouchableOpacity>
 
-                    <TouchableOpacity
-                      onPress={() => seekRelative(-10000)}
-                      disabled={isLive}
-                      style={[styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }]}
-                    >
-                      <MaterialIcons name="replay-10" size={22} color="#fff" />
-                    </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={() => seekRelative(-10000)}
+                        disabled={isLive}
+                        {...getTvProps('btn-replay', [styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }])}
+                      >
+                        <MaterialIcons name="replay-10" size={22} color="#fff" />
+                      </TouchableOpacity>
 
-                    <TouchableOpacity
-                      onPress={handlePlayPause}
-                      style={[styles.mainPlayCircle, styles.mainPlayCirclePortrait]}
-                      activeOpacity={0.7}
-                    >
-                      <Feather
-                        name={isPlaying ? 'pause' : 'play'}
-                        size={24}
-                        color="#fff"
-                        style={!isPlaying && { marginLeft: 3 }}
-                      />
-                    </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={handlePlayPause}
+                        activeOpacity={0.7}
+                        {...getTvProps('btn-play', [styles.mainPlayCircle, styles.mainPlayCirclePortrait])}
+                      >
+                        <Feather
+                          name={isPlaying ? 'pause' : 'play'}
+                          size={24}
+                          color="#fff"
+                          style={!isPlaying && { marginLeft: 3 }}
+                        />
+                      </TouchableOpacity>
 
-                    <TouchableOpacity
-                      onPress={() => seekRelative(10000)}
-                      disabled={isLive}
-                      style={[styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }]}
-                    >
-                      <MaterialIcons name="forward-10" size={22} color="#fff" />
-                    </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={() => seekRelative(10000)}
+                        disabled={isLive}
+                        {...getTvProps('btn-forward', [styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }])}
+                      >
+                        <MaterialIcons name="forward-10" size={22} color="#fff" />
+                      </TouchableOpacity>
 
-                    <TouchableOpacity
-                      onPress={() => {
-                        if (channels && channels.length > 0) {
-                          handleNextChannel();
-                        } else {
-                          seekTo(status.durationMillis || 0);
-                        }
-                      }}
-                      disabled={isLive && (!channels || channels.length === 0)}
-                      style={[styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && (!channels || channels.length === 0) && { opacity: 0.25 }]}
-                    >
-                      <Feather name="skip-forward" size={20} color="#fff" />
-                    </TouchableOpacity>
-                  </View>
+                      <TouchableOpacity
+                        onPress={() => {
+                          if (channels && channels.length > 0) {
+                            handleNextChannel();
+                          } else {
+                            seekTo(status.durationMillis || 0);
+                          }
+                        }}
+                        disabled={isLive && (!channels || channels.length === 0)}
+                        {...getTvProps('btn-next', [styles.ctrlIconBtn, styles.ctrlIconBtnPortrait, isLive && (!channels || channels.length === 0) && { opacity: 0.25 }])}
+                      >
+                        <Feather name="skip-forward" size={20} color="#fff" />
+                      </TouchableOpacity>
+                    </View>
+                  )}
                 </View>
               ) : (
                 <View style={styles.controlButtonsRow}>
                   {/* Lock Trigger Button */}
                   <TouchableOpacity
-                    style={[styles.lockBtn, isPortrait && styles.lockBtnPortrait]}
                     onPress={() => {
                       setIsLocked(true);
                       setControlsVisible(false);
                       setLockBtnVisible(true);
                     }}
                     activeOpacity={0.7}
+                    {...getTvProps('btn-lock', [styles.lockBtn, isPortrait && styles.lockBtnPortrait])}
                   >
                     <Feather name="lock" size={isPortrait ? 20 : 24} color="#fff" />
                   </TouchableOpacity>
 
                   {/* Main Player Skip / Rewind / Play Controls (HTML styled) */}
-                  <View style={[styles.pctrl, isPortrait && styles.pctrlPortrait]}>
-                    <TouchableOpacity
-                      onPress={() => {
-                        if (channels && channels.length > 0) {
-                          handlePreviousChannel();
-                        } else {
-                          seekTo(0);
-                        }
-                      }}
-                      disabled={isLive && (!channels || channels.length === 0)}
-                      style={[
-                        styles.ctrlIconBtn,
-                        isPortrait && styles.ctrlIconBtnPortrait,
-                        isLive && (!channels || channels.length === 0) && { opacity: 0.25 }
-                      ]}
-                    >
-                      <Feather name="skip-back" size={isPortrait ? 20 : 24} color="#fff" />
-                    </TouchableOpacity>
+                  {!isLive && (
+                    <View style={[styles.pctrl, isPortrait && styles.pctrlPortrait]}>
+                      <TouchableOpacity
+                        onPress={() => {
+                          if (channels && channels.length > 0) {
+                            handlePreviousChannel();
+                          } else {
+                            seekTo(0);
+                          }
+                        }}
+                        disabled={isLive && (!channels || channels.length === 0)}
+                        {...getTvProps('btn-prev', [
+                          styles.ctrlIconBtn,
+                          isPortrait && styles.ctrlIconBtnPortrait,
+                          isLive && (!channels || channels.length === 0) && { opacity: 0.25 }
+                        ])}
+                      >
+                        <Feather name="skip-back" size={isPortrait ? 20 : 24} color="#fff" />
+                      </TouchableOpacity>
 
-                    <TouchableOpacity
-                      onPress={() => seekRelative(-10000)}
-                      disabled={isLive}
-                      style={[styles.ctrlIconBtn, isPortrait && styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }]}
-                    >
-                      <MaterialIcons name="replay-10" size={isPortrait ? 22 : 26} color="#fff" />
-                    </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={() => seekRelative(-10000)}
+                        disabled={isLive}
+                        {...getTvProps('btn-replay', [styles.ctrlIconBtn, isPortrait && styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }])}
+                      >
+                        <MaterialIcons name="replay-10" size={isPortrait ? 22 : 26} color="#fff" />
+                      </TouchableOpacity>
 
-                    {/* Main Play Circle Icon */}
-                    <TouchableOpacity
-                      onPress={handlePlayPause}
-                      style={[styles.mainPlayCircle, isPortrait && styles.mainPlayCirclePortrait]}
-                      activeOpacity={0.7}
-                    >
-                      <Feather
-                        name={isPlaying ? 'pause' : 'play'}
-                        size={isPortrait ? 24 : 30}
-                        color="#fff"
-                        style={!isPlaying && { marginLeft: isPortrait ? 3 : 5 }}
-                      />
-                    </TouchableOpacity>
+                      {/* Main Play Circle Icon */}
+                      <TouchableOpacity
+                        onPress={handlePlayPause}
+                        activeOpacity={0.7}
+                        {...getTvProps('btn-play', [styles.mainPlayCircle, isPortrait && styles.mainPlayCirclePortrait])}
+                      >
+                        <Feather
+                          name={isPlaying ? 'pause' : 'play'}
+                          size={isPortrait ? 24 : 30}
+                          color="#fff"
+                          style={!isPlaying && { marginLeft: isPortrait ? 3 : 5 }}
+                        />
+                      </TouchableOpacity>
 
-                    <TouchableOpacity
-                      onPress={() => seekRelative(10000)}
-                      disabled={isLive}
-                      style={[styles.ctrlIconBtn, isPortrait && styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }]}
-                    >
-                      <MaterialIcons name="forward-10" size={isPortrait ? 22 : 26} color="#fff" />
-                    </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={() => seekRelative(10000)}
+                        disabled={isLive}
+                        {...getTvProps('btn-forward', [styles.ctrlIconBtn, isPortrait && styles.ctrlIconBtnPortrait, isLive && { opacity: 0.25 }])}
+                      >
+                        <MaterialIcons name="forward-10" size={isPortrait ? 22 : 26} color="#fff" />
+                      </TouchableOpacity>
 
-                    <TouchableOpacity
-                      onPress={() => {
-                        if (channels && channels.length > 0) {
-                          handleNextChannel();
-                        } else {
-                          seekTo(status.durationMillis || 0);
-                        }
-                      }}
-                      disabled={isLive && (!channels || channels.length === 0)}
-                      style={[
-                        styles.ctrlIconBtn,
-                        isPortrait && styles.ctrlIconBtnPortrait,
-                        isLive && (!channels || channels.length === 0) && { opacity: 0.25 }
-                      ]}
-                    >
-                      <Feather name="skip-forward" size={isPortrait ? 20 : 24} color="#fff" />
-                    </TouchableOpacity>
-                  </View>
+                      <TouchableOpacity
+                        onPress={() => {
+                          if (channels && channels.length > 0) {
+                            handleNextChannel();
+                          } else {
+                            seekTo(status.durationMillis || 0);
+                          }
+                        }}
+                        disabled={isLive && (!channels || channels.length === 0)}
+                        {...getTvProps('btn-next', [
+                          styles.ctrlIconBtn,
+                          isPortrait && styles.ctrlIconBtnPortrait,
+                          isLive && (!channels || channels.length === 0) && { opacity: 0.25 }
+                        ])}
+                      >
+                        <Feather name="skip-forward" size={isPortrait ? 20 : 24} color="#fff" />
+                      </TouchableOpacity>
+                    </View>
+                  )}
 
-                  {/* Right controls layout (Volume, Aspect Ratio & Fullscreen toggle) */}
+                  {/* Right controls layout (Volume, Aspect Ratio) */}
                   <View style={[styles.rightActionsRow, isPortrait && styles.rightActionsRowPortrait]}>
                     <TouchableOpacity
                       onPress={toggleMute}
-                      style={[styles.actionIconBtn, isPortrait && styles.actionIconBtnPortrait]}
                       activeOpacity={0.7}
+                      {...getTvProps('btn-mute', [styles.actionIconBtn, isPortrait && styles.actionIconBtnPortrait])}
                     >
                       <Feather
                         name={isMuted || volume === 0 ? 'volume-x' : 'volume-2'}
@@ -1136,47 +1522,32 @@ export default function PlayerScreen({ route, navigation }) {
                     </TouchableOpacity>
 
                     {/* Popout / Picture-in-Picture Button */}
-                    <TouchableOpacity
-                      onPress={handlePopout}
-                      style={[
-                        styles.actionIconBtn,
-                        isPortrait && styles.actionIconBtnPortrait,
-                        { marginLeft: isPortrait ? 8 : 15 }
-                      ]}
-                      activeOpacity={0.7}
-                    >
-                      <MaterialIcons name="picture-in-picture-alt" size={isPortrait ? 20 : 24} color="#fff" />
-                    </TouchableOpacity>
+                    {!isTVDevice && (
+                      <TouchableOpacity
+                        onPress={handlePopout}
+                        activeOpacity={0.7}
+                        {...getTvProps('btn-pip', [
+                          styles.actionIconBtn,
+                          isPortrait && styles.actionIconBtnPortrait,
+                          { marginLeft: isPortrait ? 8 : 15 }
+                        ])}
+                      >
+                        <MaterialIcons name="picture-in-picture-alt" size={isPortrait ? 20 : 24} color="#fff" />
+                      </TouchableOpacity>
+                    )}
 
                     {/* Aspect Ratio Button to toggle fit/fill/stretch */}
                     <TouchableOpacity
                       onPress={cycleResizeMode}
-                      style={[
+                      activeOpacity={0.7}
+                      {...getTvProps('btn-aspect', [
                         styles.actionIconBtn,
                         isPortrait && styles.actionIconBtnPortrait,
                         { marginLeft: isPortrait ? 8 : 15 }
-                      ]}
-                      activeOpacity={0.7}
+                      ])}
                     >
                       <MaterialIcons
                         name="aspect-ratio"
-                        size={isPortrait ? 20 : 24}
-                        color="#fff"
-                      />
-                    </TouchableOpacity>
-
-                    {/* Fullscreen Button toggles orientation between landscape and portrait */}
-                    <TouchableOpacity
-                      onPress={toggleFullscreen}
-                      style={[
-                        styles.actionIconBtn,
-                        isPortrait && styles.actionIconBtnPortrait,
-                        { marginLeft: isPortrait ? 8 : 15 }
-                      ]}
-                      activeOpacity={0.7}
-                    >
-                      <Feather
-                        name={width > height ? 'minimize' : 'maximize'}
                         size={isPortrait ? 20 : 24}
                         color="#fff"
                       />
@@ -1185,6 +1556,7 @@ export default function PlayerScreen({ route, navigation }) {
                 </View>
               )}
             </View>
+            )}
           </View>
         )}
 
@@ -1196,13 +1568,13 @@ export default function PlayerScreen({ route, navigation }) {
             onPress={toggleControls}
           >
             <TouchableOpacity
-              style={styles.lockBtnFloating}
               onPress={() => {
                 setIsLocked(false);
                 setControlsVisible(true);
                 showControlsWithTimeout();
               }}
               activeOpacity={0.7}
+              {...getTvProps('btn-unlock', [styles.lockBtnFloating])}
             >
               <Feather name="lock" size={20} color="#FF0000" />
               <Text style={styles.lockHintText}>Tap to Unlock</Text>
@@ -1216,108 +1588,71 @@ export default function PlayerScreen({ route, navigation }) {
       {/* Unified Channels & Categories Switcher Drawer Sidebar */}
       {rightDrawerOpen && channels && channels.length > 0 && !isInPip && (
         <View style={styles.drawerWrapper}>
-          <View style={[styles.leftDrawerPanel, { width: Math.min(380, width * 0.8) }]}>
-            <View style={styles.drawerHeader}>
-              <Text style={styles.drawerTitle}>PPLEX Channels</Text>
-              <TouchableOpacity
-                onPress={() => setRightDrawerOpen(false)}
-                style={styles.drawerCloseBtn}
-              >
-                <Feather name="x" size={18} color="#fff" />
-              </TouchableOpacity>
-            </View>
+          <View style={[styles.leftDrawerPanel, { width: Math.min(380, width * 0.8), paddingTop: 0 }]}>
+            <View style={{ flex: 1 }}>
+              {/* Single Category Row */}
+              <View style={styles.drawerCategoriesRow}>
+                <Pressable
+                  onPress={handlePrevCategory}
+                  {...getTvProps('drawer-cat-prev', styles.drawerCategoryArrowBtn)}
+                >
+                  <Feather name="chevron-left" size={20} color="#fff" />
+                </Pressable>
 
-            <View style={{ flexDirection: 'row', flex: 1 }}>
-              {/* Categories Column (Left) */}
-              <View style={styles.drawerCategoriesCol}>
-                <FlatList
-                  data={categories}
-                  keyExtractor={(item) => item}
-                  contentContainerStyle={styles.drawerCategoriesList}
-                  showsVerticalScrollIndicator={false}
-                  renderItem={({ item }) => {
-                    const isSelected = item === selectedCategory;
-                    return (
-                      <TouchableOpacity
-                        style={[
-                          styles.drawerCategoryTab,
-                          isSelected && styles.drawerCategoryTabActive
-                        ]}
-                        onPress={() => {
-                          setSelectedCategory(item);
-                          showControlsWithTimeout();
-                        }}
-                        activeOpacity={0.7}
-                      >
-                        <Text
-                          style={[
-                            styles.drawerCategoryTabText,
-                            isSelected && styles.drawerCategoryTabTextActive
-                          ]}
-                          numberOfLines={1}
-                        >
-                          {item}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  }}
-                />
+                <View style={styles.drawerCategoryTextContainer}>
+                  <Text style={[styles.drawerCategoryTextSingle, { color: isLive ? '#00C853' : '#FF0000' }]}>
+                    {selectedCategory}
+                  </Text>
+                </View>
+
+                <Pressable
+                  onPress={handleNextCategory}
+                  {...getTvProps('drawer-cat-next', styles.drawerCategoryArrowBtn)}
+                >
+                  <Feather name="chevron-right" size={20} color="#fff" />
+                </Pressable>
               </View>
 
-              {/* Column Divider */}
-              <View style={styles.drawerColDivider} />
-
-              {/* Channels Column (Right) */}
-              <View style={{ flex: 1 }}>
-                <FlatList
-                  data={filteredChannels}
-                  keyExtractor={(item) => item.id}
-                  contentContainerStyle={styles.drawerList}
-                  showsVerticalScrollIndicator={false}
-                  ListEmptyComponent={
-                    <View style={styles.emptyDrawerContainer}>
-                      <Text style={styles.emptyDrawerText}>No channels in this category</Text>
-                    </View>
-                  }
-                  renderItem={({ item }) => {
-                    const isActive = item.id === activeChannelId;
-                    return (
-                      <TouchableOpacity
-                        style={[styles.drawerItem, isActive && styles.drawerItemActive]}
-                        onPress={() => {
-                          setActiveChannelId(item.id);
-                          setCurrentUrl(item.streamUrl);
-                          setCurrentTitle(item.name);
-                          setIsLoading(true);
-                          setRightDrawerOpen(false);
-                          setIsPlaying(true);
-                          showControlsWithTimeout();
-                        }}
-                        activeOpacity={0.7}
-                      >
-                        {item.logoUrl ? (
-                          <Image source={{ uri: item.logoUrl }} style={styles.drawerItemLogo} />
-                        ) : (
-                          <View style={[styles.drawerItemLogoPlaceholder, { backgroundColor: item.logoBg || '#222' }]}>
-                            <Feather
-                              name={item.iconName === 'television' ? 'tv' : 'radio'}
-                              size={12}
-                              color={item.logoColor || '#fff'}
-                            />
-                          </View>
-                        )}
-                        <Text
-                          style={[styles.drawerItemText, isActive && styles.drawerItemTextActive]}
-                          numberOfLines={1}
-                        >
-                          {item.name}
-                        </Text>
-                        {isActive && <View style={styles.activeDot} />}
-                      </TouchableOpacity>
-                    );
-                  }}
-                />
-              </View>
+              {/* Vertical Channels List */}
+              <FlatList
+                ref={channelsListRef}
+                getItemLayout={getItemLayout}
+                data={filteredChannels}
+                keyExtractor={(item) => item.id}
+                contentContainerStyle={styles.drawerList}
+                showsVerticalScrollIndicator={false}
+                removeClippedSubviews={false}
+                ListEmptyComponent={
+                  <View style={styles.emptyDrawerContainer}>
+                    <Text style={styles.emptyDrawerText}>No channels in this category</Text>
+                  </View>
+                }
+                renderItem={({ item, index }) => (
+                  <DrawerChannelItem
+                    item={item}
+                    index={index}
+                    isActive={String(item.id) === String(activeChannelId)}
+                    isLive={isLive}
+                    isTV={isTV}
+                    rightDrawerOpen={rightDrawerOpen}
+                    focusedDrawerIndex={focusedDrawerIndex}
+                    initialFocusDone={initialFocusDone}
+                    onPress={() => {
+                      setActiveChannelId(item.id);
+                      setCurrentUrl(item.streamUrl);
+                      setCurrentTitle(item.name);
+                      setIsLoading(true);
+                      setRightDrawerOpen(false);
+                      setIsPlaying(true);
+                      showControlsWithTimeout();
+                    }}
+                    onFocus={(idx) => {
+                      setFocusedDrawerIndex(idx);
+                    }}
+                    getTvProps={getTvProps}
+                  />
+                )}
+              />
             </View>
           </View>
           <TouchableOpacity
@@ -1486,6 +1821,14 @@ const styles = StyleSheet.create({
   },
   iconBtn: {
     padding: 10,
+    borderWidth: 2,
+    borderColor: 'transparent',
+    borderRadius: 8,
+    ...Platform.select({
+      web: {
+        outlineStyle: 'none',
+      },
+    }),
   },
   iconBtnPortrait: {
     padding: 6,
@@ -1665,6 +2008,14 @@ const styles = StyleSheet.create({
   },
   lockBtn: {
     padding: 10,
+    borderWidth: 2,
+    borderColor: 'transparent',
+    borderRadius: 8,
+    ...Platform.select({
+      web: {
+        outlineStyle: 'none',
+      },
+    }),
   },
   pctrl: {
     flexDirection: 'row',
@@ -1674,6 +2025,14 @@ const styles = StyleSheet.create({
   ctrlIconBtn: {
     padding: 10,
     marginHorizontal: 10,
+    borderWidth: 2,
+    borderColor: 'transparent',
+    borderRadius: 8,
+    ...Platform.select({
+      web: {
+        outlineStyle: 'none',
+      },
+    }),
   },
   mainPlayCircle: {
     width: 60,
@@ -1683,8 +2042,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginHorizontal: 12,
-    borderWidth: 1,
+    borderWidth: 2,
     borderColor: 'rgba(255,255,255,0.15)',
+    ...Platform.select({
+      web: {
+        outlineStyle: 'none',
+      },
+    }),
   },
   rightActionsRow: {
     flexDirection: 'row',
@@ -1692,6 +2056,14 @@ const styles = StyleSheet.create({
   },
   actionIconBtn: {
     padding: 10,
+    borderWidth: 2,
+    borderColor: 'transparent',
+    borderRadius: 8,
+    ...Platform.select({
+      web: {
+        outlineStyle: 'none',
+      },
+    }),
   },
   lockOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -1706,14 +2078,35 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     borderRadius: 30,
     alignItems: 'center',
-    borderWidth: 1,
+    borderWidth: 2,
     borderColor: '#FF0000',
+    ...Platform.select({
+      web: {
+        outlineStyle: 'none',
+      },
+    }),
   },
   lockHintText: {
     color: '#fff',
     fontSize: 10,
     fontWeight: 'bold',
     marginTop: 4,
+  },
+  playerBtnFocused: {
+    borderColor: '#FFD600',
+    backgroundColor: 'rgba(255, 214, 0, 0.15)',
+    transform: [{ scale: 1.08 }],
+    shadowColor: '#FFD600',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6,
+    shadowRadius: 5,
+    elevation: 5,
+  },
+  drawerItemFocused: {
+    backgroundColor: 'rgba(255, 214, 0, 0.15)',
+    borderColor: '#FFD600',
+    borderWidth: 1.5,
+    borderRadius: 8,
   },
   drawerWrapper: {
     position: 'absolute',
@@ -1733,7 +2126,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(10, 10, 10, 0.40)', // 60% transparent background (40% opacity)
     borderRightWidth: 1,
     borderRightColor: 'rgba(255, 255, 255, 0.1)',
-    paddingTop: 15,
+    paddingTop: 0,
   },
   drawerPanel: {
     height: '100%',
@@ -1742,37 +2135,38 @@ const styles = StyleSheet.create({
     borderLeftColor: 'rgba(255, 255, 255, 0.1)',
     paddingTop: 15,
   },
-  drawerCategoriesCol: {
-    width: 120,
-    height: '100%',
+  drawerCategoriesRow: {
+    height: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: '#222',
   },
-  drawerCategoriesList: {
-    paddingVertical: 8,
-  },
-  drawerCategoryTab: {
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+  drawerCategoryArrowBtn: {
+    padding: 6,
+    borderWidth: 3,
+    borderColor: 'transparent',
     borderRadius: 8,
-    marginHorizontal: 8,
-    marginBottom: 6,
-    backgroundColor: 'transparent',
+    justifyContent: 'center',
+    alignItems: 'center',
+    ...Platform.select({
+      web: {
+        outlineStyle: 'none',
+      },
+    }),
   },
-  drawerCategoryTabActive: {
-    backgroundColor: 'rgba(255, 0, 0, 0.15)',
+  drawerCategoryTextContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  drawerCategoryTabText: {
-    color: '#aaa',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  drawerCategoryTabTextActive: {
-    color: '#FF0000',
-    fontWeight: '700',
-  },
-  drawerColDivider: {
-    width: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
-    height: '100%',
+  drawerCategoryTextSingle: {
+    fontSize: 15,
+    fontWeight: 'bold',
+    textTransform: 'uppercase',
+    letterSpacing: 1.5,
   },
   drawerHeader: {
     flexDirection: 'row',
@@ -1787,9 +2181,6 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 13,
     fontWeight: '700',
-  },
-  drawerCloseBtn: {
-    padding: 4,
   },
   leftDrawerList: {
     paddingVertical: 12,
@@ -1831,33 +2222,39 @@ const styles = StyleSheet.create({
   drawerItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
+    height: 72,
     paddingHorizontal: 15,
-    borderBottomWidth: 1,
+    borderWidth: 3,
+    borderColor: 'transparent',
     borderBottomColor: '#1a1a1a',
+    ...Platform.select({
+      web: {
+        outlineStyle: 'none',
+      },
+    }),
   },
   drawerItemActive: {
     backgroundColor: 'rgba(0, 200, 83, 0.08)',
   },
   drawerItemLogo: {
-    width: 24,
-    height: 24,
-    borderRadius: 6,
-    marginRight: 10,
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    marginRight: 12,
     resizeMode: 'contain',
     backgroundColor: '#fff',
   },
   drawerItemLogoPlaceholder: {
-    width: 24,
-    height: 24,
-    borderRadius: 6,
-    marginRight: 10,
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    marginRight: 12,
     justifyContent: 'center',
     alignItems: 'center',
   },
   drawerItemText: {
     color: '#aaa',
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '600',
     flex: 1,
   },
@@ -1866,9 +2263,9 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   activeDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
     backgroundColor: '#FF0000',
   },
   emptyDrawerContainer: {

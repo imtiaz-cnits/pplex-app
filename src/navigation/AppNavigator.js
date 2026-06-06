@@ -24,9 +24,9 @@ function TabNavigator() {
   const { colors, theme } = useTheme();
   const { isLoading } = useOverlays();
   const insets = useSafeAreaInsets();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
 
-  const isTVMode = Platform.isTV || width > 900;
+  const isTVMode = Platform.isTV || width > 900 || (width > height && Platform.OS === 'android');
 
   return (
     <Tab.Navigator
@@ -43,9 +43,9 @@ function TabNavigator() {
           </View>
         );
       }}
-      screenOptions={() => ({
+      screenOptions={({ route }) => ({
         headerShown: false,
-        tabBarActiveTintColor: colors.primary,
+        tabBarActiveTintColor: route.name === 'Live' ? '#00C853' : colors.primary,
         tabBarInactiveTintColor: colors.textSec,
         tabBarStyle: {
           position: 'absolute',

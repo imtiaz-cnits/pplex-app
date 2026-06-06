@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Platform, Animated, TouchableWithoutFeedback, useWindowDimensions } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, Platform, Animated, TouchableWithoutFeedback, useWindowDimensions, PanResponder } from 'react-native';
 import { Video, ResizeMode } from 'expo-av';
 import { Feather } from '@expo/vector-icons';
 import Sidebar from './Sidebar';
@@ -30,8 +30,8 @@ export default function OverlayManager() {
     forceUpdateData,
   } = useOverlays();
 
-  const { width: screenWidth } = useWindowDimensions();
-  const isLargeScreen = Platform.isTV || screenWidth > 900;
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  const isLargeScreen = Platform.isTV || screenWidth > 900 || (screenWidth > screenHeight && Platform.OS === 'android');
 
   const pipWidth = isLargeScreen ? 380 : 210;
   const pipHeight = isLargeScreen ? 214 : 120;
@@ -44,6 +44,40 @@ export default function OverlayManager() {
   const scaleVal = useRef(new Animated.Value(1.0)).current;
   const zoomTimeoutRef = useRef(null);
 
+  const pan = useRef(new Animated.ValueXY()).current;
+  const isDragging = useRef(false);
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (evt, gestureState) => {
+        return Math.abs(gestureState.dx) > 3 || Math.abs(gestureState.dy) > 3;
+      },
+      onPanResponderGrant: () => {
+        isDragging.current = false;
+        pan.setOffset({
+          x: pan.x._value,
+          y: pan.y._value,
+        });
+        pan.setValue({ x: 0, y: 0 });
+      },
+      onPanResponderMove: (evt, gestureState) => {
+        isDragging.current = true;
+        pan.x.setValue(gestureState.dx);
+        pan.y.setValue(gestureState.dy);
+      },
+      onPanResponderRelease: (evt, gestureState) => {
+        pan.flattenOffset();
+        if (!isDragging.current && (Math.abs(gestureState.dx) < 5 && Math.abs(gestureState.dy) < 5)) {
+          handlePipPress();
+        }
+      },
+      onPanResponderTerminate: () => {
+        pan.flattenOffset();
+      }
+    })
+  ).current;
+
   useEffect(() => {
     fetchGlobalPlaylist();
   }, []);
@@ -53,6 +87,7 @@ export default function OverlayManager() {
     if (!pipActive) {
       setIsZoomed(false);
       scaleVal.setValue(1.0);
+      pan.setValue({ x: 0, y: 0 });
       if (zoomTimeoutRef.current) {
         clearTimeout(zoomTimeoutRef.current);
       }
@@ -74,7 +109,7 @@ export default function OverlayManager() {
 
     Animated.spring(scaleVal, {
       toValue: nextZoomState ? 1.15 : 1.0,
-      useNativeDriver: true,
+      useNativeDriver: false,
       friction: 8,
       tension: 45,
     }).start();
@@ -89,7 +124,7 @@ export default function OverlayManager() {
         setIsZoomed(false);
         Animated.spring(scaleVal, {
           toValue: 1.0,
-          useNativeDriver: true,
+          useNativeDriver: false,
           friction: 8,
           tension: 45,
         }).start();
@@ -133,84 +168,90 @@ export default function OverlayManager() {
         featureName={comingSoonFeature}
         onClose={() => setComingSoonVisible(false)}
       />
-      <ForceUpdateModal
-        visible={forceUpdateData.visible}
-        downloadUrl={forceUpdateData.downloadUrl}
-        latestVersionName={forceUpdateData.latestVersion}
-      />
+      {forceUpdateData.visible && (
+        <ForceUpdateModal
+          visible={forceUpdateData.visible}
+          downloadUrl={forceUpdateData.downloadUrl}
+          latestVersionName={forceUpdateData.latestVersion}
+        />
+      )}
 
       {/* Picture-in-Picture Floating Player */}
       {pipActive && pipVideoInfo && (
-        <TouchableWithoutFeedback onPress={handlePipPress}>
+        <Animated.View 
+          {...panResponder.panHandlers}
+          style={[
+            styles.pipContainer, 
+            { 
+              width: pipWidth, 
+              height: pipHeight, 
+              right: isLargeScreen ? 25 : 20,
+              transform: [
+                { translateX: Animated.add(pan.x, translateXVal) },
+                { translateY: pan.y },
+                { scale: scaleVal }
+              ] 
+            }
+          ]}
+        >
+          <Video
+            source={{ uri: pipVideoInfo.streamUrl }}
+            rate={1.0}
+            volume={1.0}
+            isMuted={false}
+            shouldPlay={true}
+            resizeMode={ResizeMode.CONTAIN}
+            useNativeControls={false}
+            staysActiveInBackground={true}
+            style={styles.pipVideo}
+          />
+          {/* PiP Overlay Controls */}
           <Animated.View 
-            style={[
-              styles.pipContainer, 
-              { 
-                width: pipWidth, 
-                height: pipHeight, 
-                right: isLargeScreen ? 25 : 20,
-                transform: [{ scale: scaleVal }, { translateX: translateXVal }] 
-              }
-            ]}
+            pointerEvents={isZoomed ? 'auto' : 'none'}
+            style={[styles.pipControls, { opacity: opacityVal }]}
           >
-            <Video
-              source={{ uri: pipVideoInfo.streamUrl }}
-              rate={1.0}
-              volume={1.0}
-              isMuted={false}
-              shouldPlay={true}
-              resizeMode={ResizeMode.CONTAIN}
-              useNativeControls={false}
-              style={styles.pipVideo}
-            />
-            {/* PiP Overlay Controls */}
-            <Animated.View 
-              pointerEvents={isZoomed ? 'auto' : 'none'}
-              style={[styles.pipControls, { opacity: opacityVal }]}
+            <TouchableOpacity
+              style={[styles.pipBtn, { width: pipBtnSize, height: pipBtnSize, borderRadius: pipBtnRadius }]}
+              activeOpacity={0.7}
+              onPress={() => {
+                setPipActive(false);
+                navigationRef.navigate('Player', {
+                  streamUrl: pipVideoInfo.streamUrl,
+                  title: pipVideoInfo.title,
+                  channels: pipVideoInfo.channels,
+                  currentChannelId: pipVideoInfo.currentChannelId,
+                  isLive: pipVideoInfo.isLive,
+                });
+              }}
             >
-              <TouchableOpacity
-                style={[styles.pipBtn, { width: pipBtnSize, height: pipBtnSize, borderRadius: pipBtnRadius }]}
-                activeOpacity={0.7}
-                onPress={() => {
-                  setPipActive(false);
-                  navigationRef.navigate('Player', {
-                    streamUrl: pipVideoInfo.streamUrl,
-                    title: pipVideoInfo.title,
-                    channels: pipVideoInfo.channels,
-                    currentChannelId: pipVideoInfo.currentChannelId,
-                    isLive: pipVideoInfo.isLive,
-                  });
-                }}
-              >
-                <Feather name="maximize-2" size={pipIconSize} color="#fff" />
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.pipBtn, 
-                  { 
-                    backgroundColor: 'rgba(255, 61, 0, 0.9)', 
-                    width: pipBtnSize, 
-                    height: pipBtnSize, 
-                    borderRadius: pipBtnRadius 
-                  }
-                ]}
-                activeOpacity={0.7}
-                onPress={() => setPipActive(false)}
-              >
-                <Feather name="x" size={pipIconSize} color="#fff" />
-              </TouchableOpacity>
-            </Animated.View>
-            {/* PiP Mini Title Banner */}
-            <Animated.View 
-              style={[styles.pipTitleBg, { opacity: opacityVal }]}
-              pointerEvents="none"
+              <Feather name="maximize-2" size={pipIconSize} color="#fff" />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.pipBtn, 
+                { 
+                  backgroundColor: 'rgba(255, 61, 0, 0.9)', 
+                  width: pipBtnSize, 
+                  height: pipBtnSize, 
+                  borderRadius: pipBtnRadius 
+                }
+              ]}
+              activeOpacity={0.7}
+              onPress={() => setPipActive(false)}
             >
-              <Text style={styles.pipTitle} numberOfLines={1}>
-                {pipVideoInfo.title}
-              </Text>
-            </Animated.View>
+              <Feather name="x" size={pipIconSize} color="#fff" />
+            </TouchableOpacity>
           </Animated.View>
-        </TouchableWithoutFeedback>
+          {/* PiP Mini Title Banner */}
+          <Animated.View 
+            style={[styles.pipTitleBg, { opacity: opacityVal }]}
+            pointerEvents="none"
+          >
+            <Text style={styles.pipTitle} numberOfLines={1}>
+              {pipVideoInfo.title}
+            </Text>
+          </Animated.View>
+        </Animated.View>
       )}
     </>
   );
