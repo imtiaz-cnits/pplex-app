@@ -17,6 +17,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { useFocusEffect } from '@react-navigation/native';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import { useTheme } from '../context/ThemeContext';
 import TopBar from '../components/TopBar';
 import { getImageUrl, getStreamUrl, fetchMovies, fetchMovieDetails } from '../services/jellyfinApi';
@@ -69,6 +71,16 @@ export default function MovieDetailScreen({ route, navigation }) {
   const [relatedMovies, setRelatedMovies] = useState([]);
   const [isPlayFocused, setIsPlayFocused] = useState(false);
   const [detailedMovie, setDetailedMovie] = useState(null);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      if (Platform.OS !== 'web' && !Platform.isTV) {
+        ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch((err) => {
+          console.log('Error locking to portrait on MovieDetailScreen focus:', err);
+        });
+      }
+    }, [])
+  );
 
   useEffect(() => {
     if (!movie?.Id) return;

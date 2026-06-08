@@ -17,6 +17,7 @@ import {
   NativeModules,
   BackHandler,
   Dimensions,
+  Animated,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Video, ResizeMode } from 'expo-av';
@@ -194,6 +195,12 @@ export default function PlayerScreen({ route, navigation }) {
   const [currentTitle, setCurrentTitle] = useState(title || 'PPLEX Live Stream');
   const [activeChannelId, setActiveChannelId] = useState(currentChannelId);
 
+  useEffect(() => {
+    hasAutoStretchedRef.current = false;
+    videoScale.setValue(1.0);
+    currentScaleRef.current = 1.0;
+  }, [currentUrl]);
+
   // Player controls
   const [isLoading, setIsLoading] = useState(true);
   const [status, setStatus] = useState({});
@@ -241,11 +248,20 @@ export default function PlayerScreen({ route, navigation }) {
   const channelsListRef = useRef(null);
   const categoriesListRef = useRef(null);
 
+  const isLockedRef = useRef(isLocked);
+  const videoScale = useRef(new Animated.Value(1.0)).current;
+  const currentScaleRef = useRef(1.0);
+  const isPinching = useRef(false);
+  const initialPinchDistance = useRef(0);
+  const initialScale = useRef(1.0);
+  const hasAutoStretchedRef = useRef(false);
+
   // Update refs
   useEffect(() => { brightnessRef.current = brightness; }, [brightness]);
   useEffect(() => { volumeRef.current = volume; }, [volume]);
   useEffect(() => { widthRef.current = width; }, [width]);
   useEffect(() => { heightRef.current = height; }, [height]);
+  useEffect(() => { isLockedRef.current = isLocked; }, [isLocked]);
 
   const isLive = isLiveParam !== undefined ? isLiveParam : ((channels && channels.length > 0) || !status.durationMillis || status.durationMillis === 0);
   const originalBrightnessRef = useRef(1.0);
@@ -863,6 +879,30 @@ export default function PlayerScreen({ route, navigation }) {
     }, 150);
   }
 
+  const handleClose = async () => {
+    if (!isTV) {
+      try {
+        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+      } catch (err) {
+        console.log('Orientation lock error in handleClose:', err);
+      }
+    }
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+    }
+  };
+
+  const handleGoHome = async () => {
+    if (!isTV) {
+      try {
+        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+      } catch (err) {
+        console.log('Orientation lock error in handleGoHome:', err);
+      }
+    }
+    navigation.navigate(Platform.isTV ? 'TvDashboard' : 'MainTabs');
+  };
+
   const seekTo = async (millis) => {
     if (!videoRef.current) return;
     await videoRef.current.setPositionAsync(millis);
@@ -930,6 +970,10 @@ export default function PlayerScreen({ route, navigation }) {
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: (evt) => {
+        if (isLockedRef.current) return false;
+        if (evt.nativeEvent.touches && evt.nativeEvent.touches.length === 2) {
+          return true;
+        }
         const { pageX, pageY } = evt.nativeEvent;
         // Ignore top 50px and bottom 40px to prevent conflicts with phone status bar pull-down
         if (pageY < 50 || pageY > heightRef.current - 40) return false;
@@ -938,16 +982,56 @@ export default function PlayerScreen({ route, navigation }) {
         return true;
       },
       onMoveShouldSetPanResponder: (evt, gestureState) => {
+        if (isLockedRef.current) return false;
+        if (evt.nativeEvent.touches && evt.nativeEvent.touches.length === 2) {
+          return true;
+        }
         const { pageX, pageY } = evt.nativeEvent;
         if (pageY < 50 || pageY > heightRef.current - 40) return false;
         if (pageX < 60 || pageX > widthRef.current - 60) return false;
         return Math.abs(gestureState.dy) > 10 || Math.abs(gestureState.dx) > 10;
       },
       onPanResponderGrant: (evt, gestureState) => {
-        startVolume.current = volumeRef.current;
-        startBrightness.current = brightnessRef.current;
+        if (evt.nativeEvent.touches && evt.nativeEvent.touches.length === 2) {
+          const touches = evt.nativeEvent.touches;
+          const dx = touches[0].pageX - touches[1].pageX;
+          const dy = touches[0].pageY - touches[1].pageY;
+          initialPinchDistance.current = Math.sqrt(dx * dx + dy * dy);
+          initialScale.current = currentScaleRef.current;
+          isPinching.current = true;
+        } else {
+          isPinching.current = false;
+          startVolume.current = volumeRef.current;
+          startBrightness.current = brightnessRef.current;
+        }
       },
       onPanResponderMove: (evt, gestureState) => {
+        // If two fingers are touching, handle pinch to zoom/stretch
+        if (evt.nativeEvent.touches && evt.nativeEvent.touches.length === 2) {
+          const touches = evt.nativeEvent.touches;
+          const tDx = touches[0].pageX - touches[1].pageX;
+          const tDy = touches[0].pageY - touches[1].pageY;
+          const distance = Math.sqrt(tDx * tDx + tDy * tDy);
+
+          if (!isPinching.current) {
+            initialPinchDistance.current = distance;
+            initialScale.current = currentScaleRef.current;
+            isPinching.current = true;
+          } else if (initialPinchDistance.current > 0) {
+            const newScale = initialScale.current * (distance / initialPinchDistance.current);
+            // Allow zoom/stretch from 0.8 to 4.0
+            const clampedScale = Math.max(0.8, Math.min(4.0, newScale));
+            videoScale.setValue(clampedScale);
+            currentScaleRef.current = clampedScale;
+          }
+          return;
+        }
+
+        // If we are currently pinching, do not handle single-finger volume/brightness adjustments
+        if (isPinching.current) {
+          return;
+        }
+
         const { dx, dy, x0 } = gestureState;
 
         // If horizontal movement is dominant, ignore volume/brightness adjustment
@@ -990,6 +1074,11 @@ export default function PlayerScreen({ route, navigation }) {
         if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
       },
       onPanResponderRelease: (evt, gestureState) => {
+        if (isPinching.current) {
+          isPinching.current = false;
+          return;
+        }
+
         const { dx, dy } = gestureState;
 
         // Swipe channel navigation logic (only for live TV streams)
@@ -1006,6 +1095,9 @@ export default function PlayerScreen({ route, navigation }) {
         hudTimerRef.current = setTimeout(() => {
           setHudVisible(false);
         }, 1000);
+      },
+      onPanResponderTerminate: (evt, gestureState) => {
+        isPinching.current = false;
       },
     })
   ).current;
@@ -1036,6 +1128,21 @@ export default function PlayerScreen({ route, navigation }) {
     seekTo(target);
   };
 
+  const handleReadyForDisplay = (event) => {
+    if (event && event.naturalSize && !hasAutoStretchedRef.current) {
+      if (isLive) {
+        const { width: vWidth, height: vHeight } = event.naturalSize;
+        if (vWidth && vHeight) {
+          const ar = vWidth / vHeight;
+          if (ar < 1.5) {
+            setResizeModeIndex(2); // STRETCH (ResizeMode.STRETCH is index 2)
+          }
+        }
+      }
+      hasAutoStretchedRef.current = true;
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container} edges={[]}>
       {/* Video Content Container */}
@@ -1043,46 +1150,57 @@ export default function PlayerScreen({ route, navigation }) {
         style={styles.videoContainer}
         {...(!isInPip ? panResponder.panHandlers : {})}
       >
-        <Video
-          ref={videoRef}
-          source={{ uri: currentUrl }}
-          rate={speed}
-          volume={volume}
-          isMuted={isMuted}
-          resizeMode={RESIZE_MODES[resizeModeIndex]}
-          shouldPlay={isPlaying}
-          useNativeControls={false}
-          staysActiveInBackground={true}
-          onLoadStart={() => setIsLoading(true)}
-          onLoad={() => {
-            setIsLoading(false);
-            if (videoRef.current) {
-              if (speed !== 1.0) {
-                videoRef.current.setRateAsync(speed, true);
+        <Animated.View
+          style={[
+            styles.video,
+            {
+              transform: [{ scale: videoScale }],
+            },
+          ]}
+          pointerEvents="none"
+        >
+          <Video
+            ref={videoRef}
+            source={{ uri: currentUrl }}
+            rate={speed}
+            volume={volume}
+            isMuted={isMuted}
+            resizeMode={RESIZE_MODES[resizeModeIndex]}
+            shouldPlay={isPlaying}
+            useNativeControls={false}
+            staysActiveInBackground={true}
+            onLoadStart={() => setIsLoading(true)}
+            onReadyForDisplay={handleReadyForDisplay}
+            onLoad={() => {
+              setIsLoading(false);
+              if (videoRef.current) {
+                if (speed !== 1.0) {
+                  videoRef.current.setRateAsync(speed, true);
+                }
+                if (resumePosition > 0) {
+                  videoRef.current.setPositionAsync(resumePosition);
+                  positionRef.current = resumePosition;
+                }
               }
-              if (resumePosition > 0) {
-                videoRef.current.setPositionAsync(resumePosition);
-                positionRef.current = resumePosition;
+            }}
+            onError={(error) => {
+              setIsLoading(false);
+              console.log('Video error:', error, 'for URL:', currentUrl);
+            }}
+            onPlaybackStatusUpdate={(statusUpdate) => {
+              setStatus(statusUpdate);
+              if (statusUpdate.isLoaded) {
+                positionRef.current = statusUpdate.positionMillis;
+                if (statusUpdate.didJustFinish) {
+                  setIsPlaying(false);
+                } else {
+                  setIsPlaying(statusUpdate.shouldPlay);
+                }
               }
-            }
-          }}
-          onError={(error) => {
-            setIsLoading(false);
-            console.log('Video error:', error, 'for URL:', currentUrl);
-          }}
-          onPlaybackStatusUpdate={(statusUpdate) => {
-            setStatus(statusUpdate);
-            if (statusUpdate.isLoaded) {
-              positionRef.current = statusUpdate.positionMillis;
-              if (statusUpdate.didJustFinish) {
-                setIsPlaying(false);
-              } else {
-                setIsPlaying(statusUpdate.shouldPlay);
-              }
-            }
-          }}
-          style={styles.video}
-        />
+            }}
+            style={StyleSheet.absoluteFill}
+          />
+        </Animated.View>
 
         {!isInPip && (
           <>
@@ -1627,6 +1745,37 @@ export default function PlayerScreen({ route, navigation }) {
                     )}
                   </View>
                 )}
+
+                {/* Right Side Floating Buttons */}
+                <View style={[styles.rightFloatingTopContainer, isPortrait && styles.rightFloatingTopContainerPortrait]} pointerEvents="box-none">
+                  <Pressable
+                    {...getTvProps('btn-float-home', [styles.floatingIconBtn, isPortrait && styles.floatingIconBtnPortrait])}
+                    onPress={handleGoHome}
+                  >
+                    <Feather name="home" size={isPortrait ? 18 : 22} color="#fff" />
+                  </Pressable>
+                  <Pressable
+                    {...getTvProps('btn-float-close', [styles.floatingIconBtn, isPortrait && styles.floatingIconBtnPortrait])}
+                    onPress={handleClose}
+                  >
+                    <Feather name="x" size={isPortrait ? 18 : 22} color="#fff" />
+                  </Pressable>
+                </View>
+
+                <View style={[styles.rightFloatingBottomContainer, isPortrait && styles.rightFloatingBottomContainerPortrait]} pointerEvents="box-none">
+                  <Pressable
+                    {...getTvProps('btn-float-aspect', [styles.floatingIconBtn, isPortrait && styles.floatingIconBtnPortrait])}
+                    onPress={cycleResizeMode}
+                  >
+                    <MaterialIcons name="aspect-ratio" size={isPortrait ? 18 : 22} color="#fff" />
+                  </Pressable>
+                  <Pressable
+                    {...getTvProps('btn-float-fullscreen', [styles.floatingIconBtn, isPortrait && styles.floatingIconBtnPortrait])}
+                    onPress={toggleFullscreen}
+                  >
+                    <Feather name="maximize" size={isPortrait ? 18 : 22} color="#fff" />
+                  </Pressable>
+                </View>
               </View>
             )}
 
@@ -1753,6 +1902,53 @@ export default function PlayerScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
+  rightFloatingTopContainer: {
+    position: 'absolute',
+    top: 20,
+    right: 20,
+    flexDirection: 'column',
+    gap: 12,
+    zIndex: 100,
+  },
+  rightFloatingTopContainerPortrait: {
+    top: 10,
+    right: 10,
+    gap: 8,
+  },
+  rightFloatingBottomContainer: {
+    position: 'absolute',
+    bottom: 20,
+    right: 20,
+    flexDirection: 'column',
+    gap: 12,
+    zIndex: 100,
+  },
+  rightFloatingBottomContainerPortrait: {
+    bottom: 10,
+    right: 10,
+    gap: 8,
+  },
+  floatingIconBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  floatingIconBtnPortrait: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 1,
+  },
   container: {
     flex: 1,
     backgroundColor: '#000',
@@ -2309,8 +2505,8 @@ const styles = StyleSheet.create({
   drawerItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    height: 46,
-    paddingHorizontal: 15,
+    height: 48,
+    paddingHorizontal: 18,
     borderWidth: 3,
     borderColor: 'transparent',
     ...Platform.select({

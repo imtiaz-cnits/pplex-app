@@ -1,11 +1,13 @@
 import React, { useEffect, useRef } from 'react';
 import { createBottomTabNavigator, BottomTabBar } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { useFocusEffect } from '@react-navigation/native';
 import { Feather } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext';
 import { useOverlays } from '../context/OverlayContext';
 
 import { StyleSheet, View, Platform, useWindowDimensions, Dimensions } from 'react-native';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -31,6 +33,16 @@ function TabNavigator() {
   const { width, height } = useWindowDimensions();
 
   const isTVMode = isTV;
+
+  useFocusEffect(
+    React.useCallback(() => {
+      if (!isTV) {
+        ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch((err) => {
+          console.log('Error locking to portrait on TabNavigator focus:', err);
+        });
+      }
+    }, [])
+  );
 
   return (
     <Tab.Navigator
