@@ -62,7 +62,7 @@ export default function LiveTvScreen({ navigation }) {
 
   const renderChannelItem = ({ item }) => (
     <TouchableOpacity
-      style={[styles.chRow, { borderBottomColor: colors.border }]}
+      style={styles.chRow}
       activeOpacity={0.7}
       onPress={() =>
         navigation.navigate('Player', {
@@ -255,8 +255,7 @@ const styles = StyleSheet.create({
   chRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
+    paddingVertical: 7,
   },
   chSq: {
     width: 48,

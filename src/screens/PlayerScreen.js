@@ -719,8 +719,8 @@ export default function PlayerScreen({ route, navigation }) {
   };
 
   const getItemLayout = (data, index) => ({
-    length: 56,
-    offset: 56 * index,
+    length: 46,
+    offset: 46 * index,
     index,
   });
 
@@ -960,7 +960,7 @@ export default function PlayerScreen({ route, navigation }) {
 
         if (x0 < widthRef.current / 2) {
           // Adjust screen brightness (left 50%)
-          const val = Math.max(0.1, Math.min(1.0, startBrightness.current + delta));
+          const val = Math.max(0.25, Math.min(1.0, startBrightness.current + delta));
           setBrightness(val);
           brightnessRef.current = val; // Synchronously update ref to prevent stale jumps
           if (!isTV) {
@@ -1686,15 +1686,15 @@ export default function PlayerScreen({ route, navigation }) {
               {/* Vertical Channels List */}
               <FlatList
                 // ম্যাজিক ফিক্স: যখনই ড্রয়ার ওপেন হবে, এই key চেঞ্জ হবে এবং লিস্ট নতুন করে সঠিক পজিশনে রেন্ডার হবে
-                key={rightDrawerOpen ? 'drawer-open' : 'drawer-closed'} 
+                key={rightDrawerOpen ? 'drawer-open' : 'drawer-closed'}
                 ref={channelsListRef}
                 getItemLayout={getItemLayout}
                 data={filteredChannels}
                 keyExtractor={(item) => item.id}
                 // ইনডেক্স খুঁজে বের করার লজিক একটু সেফ করে দিলাম
                 initialScrollIndex={
-                  filteredChannels.findIndex(c => String(c.id) === String(activeChannelId)) > 0 
-                    ? filteredChannels.findIndex(c => String(c.id) === String(activeChannelId)) 
+                  filteredChannels.findIndex(c => String(c.id) === String(activeChannelId)) > 0
+                    ? filteredChannels.findIndex(c => String(c.id) === String(activeChannelId))
                     : 0
                 }
                 viewPosition={0} // লিস্টের একদম উপরে দেখাবে
@@ -2227,7 +2227,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 15,
+    paddingHorizontal: 16,
     borderBottomWidth: 1,
     borderBottomColor: '#222',
   },
@@ -2309,12 +2309,10 @@ const styles = StyleSheet.create({
   drawerItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    height: 56,
+    height: 46,
     paddingHorizontal: 15,
     borderWidth: 3,
     borderColor: 'transparent',
-    borderBottomWidth: 0.5,
-    borderBottomColor: '#1a1a1a',
     ...Platform.select({
       web: {
         outlineStyle: 'none',
@@ -2341,7 +2339,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   drawerItemText: {
-    color: '#aaa',
+    color: '#fff',
     fontSize: 15,
     fontWeight: '600',
     flex: 1,

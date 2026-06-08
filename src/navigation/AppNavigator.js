@@ -18,7 +18,8 @@ import MovieDetailScreen from '../screens/MovieDetailScreen';
 import PlayerScreen from '../screens/PlayerScreen';
 
 const { width: initWidth, height: initHeight } = Dimensions.get('window');
-const isTV = Platform.isTV || (Math.min(initWidth, initHeight) >= 500 && Math.max(initWidth, initHeight) > 900);
+const isTV = Platform.isTV;
+const isTablet = Math.min(initWidth, initHeight) >= 720;
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();

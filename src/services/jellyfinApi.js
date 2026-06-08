@@ -12,8 +12,8 @@ export const getBackdropUrl = (itemId) => {
 
 export const getStreamUrl = (itemId) => {
   if (!itemId) return '';
-  // HLS stream with device capabilities and mediaSourceId to prevent 400 Bad Request, forcing AAC audio transcoding
-  return `${JELLYFIN_URL}/Videos/${itemId}/master.m3u8?api_key=${JELLYFIN_API_KEY}&deviceId=pplex-app&mediaSourceId=${itemId}&videoCodec=h264&audioCodec=aac&transcodingContainer=ts&transcodingProtocol=hls&audioChannels=2`;
+  // HLS stream with device capabilities and MediaSourceId to prevent 400 Bad Request, forcing AAC audio transcoding
+  return `${JELLYFIN_URL}/Videos/${itemId}/master.m3u8?api_key=${JELLYFIN_API_KEY}&DeviceId=pplex-app&MediaSourceId=${itemId}&VideoCodec=h264&AudioCodec=aac&TranscodingContainer=ts&TranscodingProtocol=hls&AudioChannels=2`;
 };
 
 export const fetchMovies = async (limit = 30, startIndex = 0) => {
